@@ -14,6 +14,20 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+// FaceTrack 0.2.5 — las llaves con todos sus nombres.
+//
+// La prueba del teléfono con la 0.2.4 (captura ~9:43) contó la verdad:
+// el cascarón de búsqueda trae el lsd (lsd:sí) pero ni token ni
+// consultas (dtsg:no · doc:0). El token de Facebook hoy firma como
+// DTSGInitData — la 0.2.4 solo conocía su nombre viejo,
+// DTSGInitialToken — y las consultas pueden venir con las comillas
+// escapadas una y otra vez. Esta versión caza el token por TODOS sus
+// nombres, des-escapa la página en cascada (una, dos, tres veces) y,
+// si el cascarón sigue mudo, va por las llaves a la PORTADA de
+// Facebook (facebook.com), que las trae seguras. El POST a
+// /api/graphql/ con las galletas sigue siendo la puerta; el informe
+// «debug» cuenta cascarón, portada y qué respondió el POST.
+
 // FaceTrack 0.2.4 — la puerta interna.
 //
 // La prueba del teléfono con la 0.2.3 contó la verdad completa (7 nov):
@@ -214,7 +228,7 @@
 // como "facebookexternalhit/1.1" (el rastreador de vistas previas del
 // propio Facebook), que no está limitado.
 
-const VERSION = "0.2.4";
+const VERSION = "0.2.5";
 
 // La cara con la que se piden las páginas (un Chrome de escritorio).
 const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -960,24 +974,39 @@ async function itemsDeParaTi(limite) {
 
 // ---------- búsqueda real y páginas seguidas (con sesión) ----------
 
-// Las LLAVES de la puerta interna, cazadas del cascarón: el token
-// fb_dtsg, el lsd y los doc_id de las consultas que la página trae
-// embebidos.
+// Las LLAVES de la puerta interna, cazadas del cascarón (0.2.5): el
+// token fb_dtsg — que hoy firma como DTSGInitData, no solo con su
+// nombre viejo DTSGInitialToken —, el lsd y los doc_id de las
+// consultas embebidas. Las páginas de Facebook escapan sus comillas
+// una y otra vez: se des-escapa en cascada y se caza en cada nivel.
 function tokensDe(plano) {
   const fuera = { dtsg: "", lsd: "", docs: [] };
-  let m = /"DTSGInitialToken",\[\],\{"token":"([^"]{5,200})"/.exec(plano) ||
-    /name="fb_dtsg"\s+value="([^"]{5,200})"/.exec(plano) ||
-    /"fb_dtsg":"([^"]{5,200})"/.exec(plano);
-  if (m) fuera.dtsg = m[1];
-  m = /"LSD",\[\],\{"token":"([^"]{5,60})"/.exec(plano) ||
-    /name="lsd"\s+value="([^"]{5,60})"/.exec(plano) ||
-    /"lsd":"([^"]{5,60})"/.exec(plano);
-  if (m) fuera.lsd = m[1];
+  const niveles = [plano];
+  let s = plano;
+  while (s.indexOf('\\"') >= 0 && niveles.length < 6) {
+    s = s.split('\\"').join('"');
+    niveles.push(s);
+  }
   const vistos = {};
-  const rxD = /"doc_id":"(\d{8,25})"/g;
-  let mm;
-  while ((mm = rxD.exec(plano)) !== null) {
-    if (!vistos[mm[1]]) { vistos[mm[1]] = true; fuera.docs.push(mm[1]); }
+  for (let n = 0; n < niveles.length; n++) {
+    const t = niveles[n];
+    if (!fuera.dtsg) {
+      const m = /"DTSG[A-Za-z]{0,24}",\[\],\{"token":"([^"]{5,200})"/.exec(t) ||
+        /name="fb_dtsg"\s+value="([^"]{5,200})"/.exec(t) ||
+        /"fb_dtsg":"([^"]{5,200})"/.exec(t);
+      if (m) fuera.dtsg = m[1];
+    }
+    if (!fuera.lsd) {
+      const m = /"LSD",\[\],\{"token":"([^"]{5,60})"/.exec(t) ||
+        /name="lsd"\s+value="([^"]{5,60})"/.exec(t) ||
+        /"lsd":"([^"]{5,60})"/.exec(t);
+      if (m) fuera.lsd = m[1];
+    }
+    const rxD = /"doc_id"\s*:\s*\\?"(\d{8,25})/g;
+    let mm;
+    while ((mm = rxD.exec(t)) !== null) {
+      if (!vistos[mm[1]]) { vistos[mm[1]] = true; fuera.docs.push(mm[1]); }
+    }
   }
   return fuera;
 }
@@ -1090,17 +1119,34 @@ async function itemsDeBusquedaReal(q, limite) {
       partes.push("www ✗ " + ab.traza.join(","));
     }
   }
+  // 1b. Si el cascarón trajo las llaves incompletas, la PORTADA de
+  // Facebook las trae seguras (ahí vive el token con todos sus
+  // nombres y montones de consultas).
+  if (tokens && (!tokens.dtsg || tokens.docs.length === 0) && Date.now() - inicio < 6000) {
+    const ab2 = await abrirFacebook("https://www.facebook.com/", 1200000, 4500, false, false);
+    if (ab2.r) {
+      const tk2 = tokensDe(ab2.r.text().split('\\"').join('"'));
+      if (!tokens.dtsg) tokens.dtsg = tk2.dtsg;
+      if (!tokens.lsd) tokens.lsd = tk2.lsd;
+      for (let d = 0; d < tk2.docs.length; d++) {
+        if (tokens.docs.indexOf(tk2.docs[d]) < 0) tokens.docs.push(tk2.docs[d]);
+      }
+      partes.push("portada · dtsg:" + (tokens.dtsg ? "sí" : "no") + " · doc:" + tokens.docs.length);
+    } else {
+      partes.push("portada ✗");
+    }
+  }
   // 2. LA PUERTA INTERNA: el POST con las llaves (hasta dos doc_id).
   if (tokens && tokens.dtsg && tokens.docs.length > 0) {
     const cuantos = Math.min(tokens.docs.length, 2);
     for (let g = 0; g < cuantos && nodos.length === 0; g++) {
-      if (Date.now() - inicio > 9500) break;
+      if (Date.now() - inicio > 11000) break;
       const gr = await pedirGraphQL(q, tokens.docs[g], tokens.dtsg, tokens.lsd, g === 0 ? "videos" : "");
       partes.push(gr.parte);
       if (gr.nodos.length > 0) nodos = gr.nodos;
     }
-  } else if (tokens && !tokens.dtsg) {
-    partes.push("graphql: sin llaves en el cascarón");
+  } else if (tokens) {
+    partes.push("graphql: sin llaves (cascarón ni portada)");
   }
   // 3. Las otras puertas (Watch y móvil), por si alguna aún responde.
   const puertas = [
@@ -1560,8 +1606,8 @@ async function informarBusquedaViva() {
   try { q = String(kino.storage.get("fbQ") || ""); } catch (e) { q = ""; }
   if (!q) return "BÚSQUEDA EN VIVO: sin búsqueda previa";
   const partes = [];
-  const ab = await abrirFacebook("https://www.facebook.com/search/top?q=" + encodeURIComponent(q), 1200000, 6000, false, true);
-  if (!ab.r) return ("BÚSQUEDA EN VIVO «" + q.slice(0, 30) + "» ‖ www ✗ " + ab.traza.join(",")).slice(0, 380);
+  const ab = await abrirFacebook("https://www.facebook.com/search/top?q=" + encodeURIComponent(q), 1200000, 5000, false, true);
+  if (!ab.r) return ("BÚSQUEDA EN VIVO «" + q.slice(0, 30) + "» ‖ www ✗ " + ab.traza.join(",")).slice(0, 440);
   const html = ab.r.text();
   const plano = html.split('\\"').join('"');
   const tokens = tokensDe(plano);
@@ -1577,11 +1623,26 @@ async function informarBusquedaViva() {
     " · págs:" + Object.keys(vistos).length +
     " · dtsg:" + (tokens.dtsg ? "sí" : "no") + " · lsd:" + (tokens.lsd ? "sí" : "no") +
     " · doc:" + tokens.docs.length);
+  // Si el cascarón quedó mudo, la PORTADA dice si las llaves viven allí.
+  if (!tokens.dtsg || tokens.docs.length === 0) {
+    const ab2 = await abrirFacebook("https://www.facebook.com/", 1200000, 4500, false, false);
+    if (ab2.r) {
+      const tk2 = tokensDe(ab2.r.text().split('\\"').join('"'));
+      if (!tokens.dtsg) tokens.dtsg = tk2.dtsg;
+      if (!tokens.lsd) tokens.lsd = tk2.lsd;
+      for (let d = 0; d < tk2.docs.length; d++) {
+        if (tokens.docs.indexOf(tk2.docs[d]) < 0) tokens.docs.push(tk2.docs[d]);
+      }
+      partes.push("portada · dtsg:" + (tokens.dtsg ? "sí" : "no") + " · doc:" + tokens.docs.length);
+    } else {
+      partes.push("portada ✗");
+    }
+  }
   if (tokens.dtsg && tokens.docs.length > 0) {
     const gr = await pedirGraphQL(q, tokens.docs[0], tokens.dtsg, tokens.lsd, "videos");
     partes.push(gr.parte);
   }
-  return ("BÚSQUEDA EN VIVO «" + q.slice(0, 30) + "» ‖ " + partes.join(" ‖ ")).slice(0, 380);
+  return ("BÚSQUEDA EN VIVO «" + q.slice(0, 30) + "» ‖ " + partes.join(" ‖ ")).slice(0, 440);
 }
 
 async function informeDebug() {

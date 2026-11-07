@@ -14,7 +14,19 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-// FaceTrack 0.1.1 — Facebook en Kino: vídeos públicos, nada más.
+// FaceTrack 0.1.2 — Facebook en Kino: vídeos públicos, nada más.
+//
+// Novedades de la 0.1.2 (el informe del teléfono dijo la verdad): al
+// abrir el enlace compartido, Facebook respondió "HTTP 400": rechazo en
+// la puerta, ni siquiera muro de sesión. Suele ser la CARA con que uno
+// se presenta (los encabezados del navegador) o la galleta que falta.
+// Ahora toda petición a Facebook sube por una ESCALERA de caras: la de
+// Chrome (como antes), la de Chrome con una galleta de bienvenida
+// (se visita primero la raíz de Facebook para que le den la galleta),
+// la simple sin encabezados propios, y las versiones móviles (m.). El
+// peldaño que funciona queda RECORDADO, y la próxima petición entra
+// directo por él. El informe "debug" muestra la escalera completa con
+// lo que respondió cada peldaño.
 //
 // Novedades de la 0.1.1 (primeras pruebas del teléfono): el Inicio sin
 // páginas guardadas ya no lanza error (Kino muestra su aviso propio de
@@ -53,7 +65,7 @@
 // como "facebookexternalhit/1.1" (el rastreador de vistas previas del
 // propio Facebook), que no está limitado.
 
-const VERSION = "0.1.1";
+const VERSION = "0.1.2";
 
 // La cara con la que se piden las páginas (un Chrome de escritorio).
 const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -70,20 +82,70 @@ let trazaError = "";
 // "Ver más" de una misma fila no gastan dos descargas iguales.
 var cachePag = {};
 
-// ---------- pedir páginas ----------
+// ---------- pedir páginas: la escalera contra el HTTP 400 ----------
 
-async function pedir(url, tope, tiempoMs) {
-  const r = await kino.fetch(url, {
-    headers: {
-      "User-Agent": UA_PAGINA,
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "es-ES,es;q=0.9,es-419;q=0.8,en;q=0.7"
-    },
-    timeoutMs: tiempoMs || 12000,
-    maxBytes: tope || 1800000
-  });
+// La cara de Chrome con la que se presentan las peticiones.
+const ENCABEZADOS = {
+  "User-Agent": UA_PAGINA,
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "es-ES,es;q=0.9,es-419;q=0.8,en;q=0.7"
+};
+
+// Una petición sola, con o sin cara propia.
+async function pedirSimple(url, tope, tiempoMs, conEncabezados) {
+  const opciones = { timeoutMs: tiempoMs || 9000, maxBytes: tope || 1200000 };
+  if (conEncabezados) opciones.headers = ENCABEZADOS;
+  const r = await kino.fetch(url, opciones);
   if (!r.ok) throw kino.error("unavailable", "HTTP " + r.status + " en " + url.slice(0, 90));
   return r;
+}
+
+// La dirección móvil equivalente (a veces responde donde www dice que no).
+function versionMovil(url) {
+  return String(url).replace("://www.facebook.com/", "://m.facebook.com/");
+}
+
+// Abre una página de Facebook subiendo por la escalera de caras hasta que
+// una deje pasar. Devuelve { r, traza }: r es null si ninguna pudo, y la
+// traza dice qué respondió cada peldaño (se ve en "debug").
+async function abrirFacebook(url, tope, tiempoMs, sinMovil) {
+  let via = "";
+  try { via = String(kino.storage.get("fbVia") || ""); } catch (e) { /* sin almacén */ }
+  const todas = [
+    { nombre: "navegador", enc: true, calentar: false, movil: false },
+    { nombre: "galletas", enc: true, calentar: true, movil: false },
+    { nombre: "simple", enc: false, calentar: false, movil: false },
+    { nombre: "m.navegador", enc: true, calentar: false, movil: true },
+    { nombre: "m.simple", enc: false, calentar: false, movil: true }
+  ];
+  const variantes = [];
+  for (let i = 0; i < todas.length; i++) {
+    if (todas[i].movil && sinMovil) continue;
+    if (todas[i].nombre === via) variantes.unshift(todas[i]);
+    else variantes.push(todas[i]);
+  }
+  const traza = [];
+  for (let i = 0; i < variantes.length; i++) {
+    const v = variantes[i];
+    const destino = v.movil ? versionMovil(url) : url;
+    try {
+      if (v.calentar) {
+        // La galleta de bienvenida: visitar la raíz para que le den una
+        // galleta a la jarra antes de pedir el vídeo.
+        try { await pedirSimple("https://www.facebook.com/", 20000, 5000, true); } catch (e) { /* la que se pueda */ }
+      }
+      const r = await pedirSimple(destino, tope, tiempoMs, v.enc);
+      traza.push(v.nombre + ":" + r.status);
+      if (r.ok) {
+        try { kino.storage.set("fbVia", v.nombre); } catch (e) { /* sin almacén */ }
+        return { r: r, traza: traza };
+      }
+    } catch (e) {
+      const m = /HTTP (\d+)/.exec(String(e && e.message ? e.message : String(e)));
+      traza.push(v.nombre + ":" + (m ? m[1] : "x"));
+    }
+  }
+  return { r: null, traza: traza };
 }
 
 // Quita el escape de un pedazo de cadena tal como viene en el JSON
@@ -303,12 +365,11 @@ function metaOg(html, propiedad) {
 function enlaceFacebook(q) {
   let s = String(q || "").trim();
   if (!s) return null;
-  if (!/^https?:\/\//i.test(s)) {
-    if (/^(?:www\.|m\.|web\.)?(?:facebook\.com|fb\.watch|fb\.me)\//i.test(s)) s = "https://" + s;
-    else return null;
-  }
-  if (!/(?:facebook\.com|fb\.watch|fb\.me)/i.test(s)) return null;
-  return s;
+  // El enlace puede venir rodeado de palabras: se saca de donde esté.
+  const m = /https?:\/\/(?:www\.|m\.|web\.|mbasic\.)?(?:facebook\.com|fb\.watch|fb\.me)\/[^\s"'<>]+/i.exec(s);
+  if (m) return m[0].replace(/[,.;:!?)»"']+$/, "");
+  if (/^(?:www\.|m\.|web\.|mbasic\.)?(?:facebook\.com|fb\.watch|fb\.me)\//i.test(s)) return "https://" + s;
+  return null;
 }
 
 // El id de vídeo escondido en una dirección de Facebook (si lo hay):
@@ -337,27 +398,27 @@ function pintaMuro(html) {
 // El ítem de un enlace pegado: se abre la página y se lee su vídeo.
 async function itemDeEnlace(url) {
   trazaBusqueda = "enlace pegado: " + url.slice(0, 80);
-  let r = null;
-  try {
-    r = await pedir(url, 1200000, 11000);
-  } catch (e) {
-    trazaError = "al abrir el enlace: " + String(e && e.message ? e.message : e).slice(0, 140);
+  // El enlace se guarda ANTES de abrirlo: aunque falle, el informe
+  // "debug" lo tiene para su prueba en vivo.
+  try { kino.storage.set("fbUltimo", url); } catch (e) { /* sin almacén */ }
+  const ab = await abrirFacebook(url, 1200000, 9000, false);
+  if (!ab.r) {
+    trazaError = "ninguna cara pudo abrir el enlace: " + ab.traza.join(", ");
     throw kino.error("not_found", "no se pudo abrir " + url.slice(0, 80), {
-      userMessage: "No pude abrir ese enlace. Revisa tu conexión y prueba de nuevo; escribiendo debug sale el informe."
+      userMessage: "Facebook no dejó abrir ese enlace desde la app. Prueba de nuevo en un rato; escribiendo debug sale el informe."
     });
   }
-  const html = r.text();
-  try { kino.storage.set("fbUltimo", url); } catch (e) { /* sin almacén: solo diagnóstico */ }
+  const html = ab.r.text();
   const videos = videosDeHtml(html);
   const posterOg = metaOg(html, "og:image");
-  trazaBusqueda = "enlace: HTTP " + r.status + ", " + html.length + " caracteres, " +
-    videos.length + " vídeo(s), muro de sesión: " + (pintaMuro(html) ? "sí" : "no");
+  trazaBusqueda = "enlace: escalera " + ab.traza.join(" → ") + " · " + html.length +
+    " caracteres · " + videos.length + " vídeo(s) · muro: " + (pintaMuro(html) ? "sí" : "no");
   if (videos.length > 0) {
     const it = itemDeVideo(videos[0], "", posterOg);
     if (it) return [it];
   }
   // Los /share/ a veces redirigen a una dirección con el id: se rescata de ahí.
-  const idFinal = idDeUrl(r.url || url);
+  const idFinal = idDeUrl(ab.r.url || url);
   const og = metaOg(html, "og:video:secure_url") || metaOg(html, "og:video:url") || metaOg(html, "og:video");
   const tituloOg = metaOg(html, "og:title") || "Video de Facebook";
   if (idFinal) {
@@ -422,10 +483,8 @@ async function videosDePagina(slug) {
     // El buscador tiene un presupuesto: si la primera dirección ya lo gastó,
     // no se espera a la segunda (mejor un aviso honesto que un timeout).
     if (i > 0 && Date.now() - inicio > 6000) break;
-    try {
-      const r = await pedir(urls[i], 1200000, 9000);
-      nodos = videosDeHtml(r.text());
-    } catch (e) { /* a la siguiente */ }
+    const ab = await abrirFacebook(urls[i], 1200000, 9000, false);
+    if (ab.r) nodos = videosDeHtml(ab.r.text());
   }
   // Los más nuevos primero cuando se sabe cuándo se publicaron.
   nodos.sort(function (a, b) {
@@ -617,17 +676,18 @@ export async function resolve(ref, options) {
   // Enlace completo guardado (cuando no había id numérico).
   if (ref.indexOf("u:") === 0) {
     const url = ref.slice(2);
-    const r = await pedir(url, 1800000, 12000);
-    try {
-      const s = streamDeHtml(r.text(), null);
-      trazaResolve = "enlace → MP4 " + (s.label || "");
-      return s;
-    } catch (e) {
-      trazaError = "enlace sin vídeo reproducible";
-      throw kino.error("not_found", "enlace sin vídeo: " + String(e && e.message ? e.message : e).slice(0, 120), {
-        userMessage: "Facebook no entregó este vídeo: puede ser privado, haberse borrado o pedir iniciar sesión."
-      });
+    const ab = await abrirFacebook(url, 1800000, 9000, false);
+    if (ab.r) {
+      try {
+        const s = streamDeHtml(ab.r.text(), null);
+        trazaResolve = "enlace → MP4 " + (s.label || "") + " (" + ab.traza.join(" → ") + ")";
+        return s;
+      } catch (e) { /* al error honesto */ }
     }
+    trazaError = "enlace sin vídeo reproducible (" + (ab.r ? ab.traza.join(", ") : "sin abrir") + ")";
+    throw kino.error("not_found", "enlace sin vídeo reproducible", {
+      userMessage: "Facebook no entregó este vídeo: puede ser privado, haberse borrado o pedir iniciar sesión."
+    });
   }
 
   // id de vídeo: se pide la página canónica del vídeo y de ahí salen
@@ -636,32 +696,26 @@ export async function resolve(ref, options) {
     const id = ref.slice(2);
     const intentos = [
       "https://www.facebook.com/video/video.php?v=" + encodeURIComponent(id),
+      "https://www.facebook.com/watch/?v=" + encodeURIComponent(id),
       "https://m.facebook.com/watch/?v=" + encodeURIComponent(id) + "&_rnr"
     ];
-    let ultimo = null;
     const inicio = Date.now();
+    const trazaIntentos = [];
     for (let i = 0; i < intentos.length; i++) {
-      // El respaldo m. solo si queda tiempo para él.
-      if (i > 0 && Date.now() - inicio > 10000) break;
-      let h = "";
+      // Sin tiempo para más intentos: aviso honesto.
+      if (i > 0 && Date.now() - inicio > 12000) break;
+      const ab = await abrirFacebook(intentos[i], 1800000, 9000, true);
+      trazaIntentos.push(ab.r ? ab.traza.join(",") : "(" + ab.traza.join(",") + ")");
+      if (!ab.r) continue;
       try {
-        h = (await pedir(intentos[i], 1800000, 12000)).text();
-      } catch (e) {
-        ultimo = e;
-        trazaError = "HTTP fallo en " + intentos[i].slice(0, 50) + ": " + String(e && e.message ? e.message : e).slice(0, 100);
-        continue;
-      }
-      try {
-        const s = streamDeHtml(h, id);
-        trazaResolve = "v:" + id + " → MP4 " + (s.label || "") + " (intento " + (i + 1) + ", " + h.length + " caracteres)";
+        const s = streamDeHtml(ab.r.text(), id);
+        trazaResolve = "v:" + id + " → MP4 " + (s.label || "") + " · intento " + (i + 1);
         return s;
       } catch (e) {
-        ultimo = e;
-        trazaError = "página del vídeo sin MP4 (" + h.length + " caracteres, muro: " + (pintaMuro(h) ? "sí" : "no") + ")";
+        trazaError = "página del vídeo sin MP4 (intento " + (i + 1) + ")";
       }
     }
-    throw kino.error("not_found", "Facebook no entregó el vídeo " + id + ": " +
-      (ultimo ? String(ultimo && ultimo.message ? ultimo.message : ultimo).slice(0, 120) : "sin enlaces"), {
+    throw kino.error("not_found", "Facebook no entregó el vídeo " + id + ": " + trazaIntentos.join(" | "), {
       userMessage: "Facebook no entregó este vídeo: puede ser privado, haberse borrado o pedir iniciar sesión. Escribe debug para el informe."
     });
   }
@@ -685,29 +739,23 @@ export async function settingsStatus() {
 // qué le respondió Facebook — el informe que dice la verdad del teléfono.
 async function informarEnVivo(url) {
   if (!url) return "EN VIVO: sin enlace previo (pega un enlace y vuelve a escribir debug)";
-  let paso = "EN VIVO " + url.slice(0, 70) + " → ";
-  try {
-    const r = await pedir(url, 1200000, 11000);
-    const html = r.text();
-    const videos = videosDeHtml(html);
-    paso = paso + "HTTP " + r.status + " · " + html.length + " caracteres" +
-      " · dirección final: " + String(r.url || url).slice(0, 70);
-    paso = paso + " · bloques data-sjs: " + bloquesSjs(html).length +
-      " · vídeos encontrados: " + videos.length +
-      " · muro de sesión: " + (pintaMuro(html) ? "SÍ" : "no");
-    if (videos.length > 0) {
-      const u = urlsDeVideo(videos[0]);
-      paso = paso + " · primer vídeo id " + String(videos[0].id || "-") +
-        " · MP4 HD: " + (u.hd ? "sí" : "no") + " · MP4 SD: " + (u.sd ? "sí" : "no");
-    } else {
-      const og = metaOg(html, "og:video:secure_url") || metaOg(html, "og:video:url") || metaOg(html, "og:video");
-      const idFinal = idDeUrl(r.url || url);
-      paso = paso + " · og:video: " + (og ? "sí" : "no") + " · id en la dirección final: " + (idFinal || "no");
-    }
-    return paso;
-  } catch (e) {
-    return paso + "ERROR al abrir: " + String(e && e.message ? e.message : e).slice(0, 120);
+  let paso = "EN VIVO " + url.slice(0, 60) + " → ";
+  const ab = await abrirFacebook(url, 1200000, 9000, false);
+  if (!ab.r) return paso + "NINGUNA CARA PASÓ: " + ab.traza.join(", ");
+  const html = ab.r.text();
+  const videos = videosDeHtml(html);
+  paso = paso + "escalera " + ab.traza.join(" → ") + " · " + html.length + " caracteres" +
+    " · final: " + String(ab.r.url || url).slice(0, 55) +
+    " · data-sjs: " + bloquesSjs(html).length +
+    " · vídeos: " + videos.length +
+    " · muro: " + (pintaMuro(html) ? "SÍ" : "no");
+  if (videos.length > 0) {
+    const u = urlsDeVideo(videos[0]);
+    return paso + " · id " + String(videos[0].id || "-") +
+      " · HD: " + (u.hd ? "sí" : "no") + " · SD: " + (u.sd ? "sí" : "no");
   }
+  const og = metaOg(html, "og:video:secure_url") || metaOg(html, "og:video:url") || metaOg(html, "og:video");
+  return paso + " · og:video: " + (og ? "sí" : "no") + " · id final: " + (idDeUrl(ab.r.url || url) || "no");
 }
 
 async function informeDebug() {

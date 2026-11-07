@@ -14,7 +14,18 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-// FaceTrack 0.1.4 — Facebook en Kino: vídeos públicos, nada más.
+// FaceTrack 0.1.5 — Facebook en Kino: vídeos públicos, nada más.
+//
+// Novedades de la 0.1.5 (el cuarto informe dejó el diagnóstico fino:
+// «js: 0 · playable_url: no» — la página del reel viene SIN ningún MP4
+// en ningún escondite): llega EL TESTIGO, el reproductor público de
+// Facebook para incrustar vídeos en webs externas (plugins/video.php
+// y video/embed), que por diseño NO pide sesión. Al reproducir se
+// prueban esas dos direcciones tras la página del reel; el cazador
+// conoce sus enlaces clásicos (hd_src/sd_src), y el informe "debug"
+// interroga al testigo cuando la página del enlace viene vacía: su
+// respuesta dirá si el vídeo existe fuera del muro o si ya solo lo
+// entrega Facebook con sesión (→ entonces, ventanita v0.2).
 //
 // Novedades de la 0.1.4 (el tercer informe: la puerta se abre pero la
 // casa viene vacía): la escalera funcionó y la página del reel bajó
@@ -95,7 +106,7 @@
 // como "facebookexternalhit/1.1" (el rastreador de vistas previas del
 // propio Facebook), que no está limitado.
 
-const VERSION = "0.1.4";
+const VERSION = "0.1.5";
 
 // La cara con la que se piden las páginas (un Chrome de escritorio).
 const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -273,8 +284,10 @@ function esVideo(n) {
   if (n.__typename === "Video") return true;
   // Algunas páginas traen el vídeo sin la etiqueta, pero con enlaces.
   // LOS REELS llegan así y SIN id: el id lo lleva el nodo papá, y el
-  // caminador se lo presta — no se vuelve a exigir aquí.
-  if (n.browser_native_hd_url || n.browser_native_sd_url || n.playable_url || n.progressive_urls) return true;
+  // caminador se lo presta — no se vuelve a exigir aquí. hd_src/sd_src
+  // son los enlaces del reproductor público de incrustar (plugins).
+  if (n.browser_native_hd_url || n.browser_native_sd_url || n.playable_url ||
+      n.progressive_urls || n.hd_src || n.sd_src) return true;
   return false;
 }
 
@@ -382,13 +395,13 @@ function urlsCrudas(html) {
       .replace(/\\\\u([0-9a-fA-F]{4})/g, function (m, h) { return String.fromCharCode(parseInt(h, 16)); }));
   } catch (e) { /* se caza sobre el original */ }
   for (let c = 0; c < cazas.length; c++) {
-    const rx = /"(browser_native_hd_url|browser_native_sd_url|playable_url_quality_hd|playable_url)":"((?:[^"\\]|\\.)*)"/g;
+    const rx = /"(browser_native_hd_url|browser_native_sd_url|playable_url_quality_hd|playable_url|hd_src|sd_src)":"((?:[^"\\]|\\.)*)"/g;
     let m;
     while ((m = rx.exec(cazas[c])) !== null) {
       const u = soltar(m[2]);
       if (!u || u.indexOf("http") !== 0) continue;
       if (/\.mpd(\?|$)/i.test(u) || /\.m3u8(\?|$)/i.test(u)) continue;
-      if (m[1] === "browser_native_hd_url" || m[1] === "playable_url_quality_hd") {
+      if (m[1] === "browser_native_hd_url" || m[1] === "playable_url_quality_hd" || m[1] === "hd_src") {
         if (!fuera.hd) fuera.hd = u;
       } else {
         if (!fuera.sd) fuera.sd = u;
@@ -408,8 +421,8 @@ function urlsDeVideo(v) {
     if (legado && typeof legado[k] === "string" && legado[k]) return legado[k];
     return "";
   };
-  let hd = campo("browser_native_hd_url") || campo("playable_url_quality_hd");
-  let sd = campo("browser_native_sd_url") || campo("playable_url");
+  let hd = campo("browser_native_hd_url") || campo("playable_url_quality_hd") || campo("hd_src");
+  let sd = campo("browser_native_sd_url") || campo("playable_url") || campo("sd_src");
   const frag = v.videoDeliveryResponseFragment && v.videoDeliveryResponseFragment.videoDeliveryResponseResult;
   const prog = frag && Array.isArray(frag.progressive_urls) ? frag.progressive_urls : [];
   for (let i = 0; i < prog.length; i++) {
@@ -857,8 +870,12 @@ export async function resolve(ref, options) {
   // los MP4 firmados (caducan: por eso se resuelve al reproducir).
   if (ref.indexOf("v:") === 0) {
     const id = ref.slice(2);
+    const dirReel = "https://www.facebook.com/reel/" + encodeURIComponent(id);
     const intentos = [
-      "https://www.facebook.com/reel/" + encodeURIComponent(id),
+      dirReel,
+      // El testigo: el reproductor público de incrustar, que no pide sesión.
+      "https://www.facebook.com/plugins/video.php?href=" + encodeURIComponent(dirReel + "/") + "&show_text=false",
+      "https://www.facebook.com/video/embed?video_id=" + encodeURIComponent(id),
       "https://www.facebook.com/video/video.php?v=" + encodeURIComponent(id),
       "https://www.facebook.com/watch/?v=" + encodeURIComponent(id),
       "https://m.facebook.com/reel/" + encodeURIComponent(id),
@@ -888,7 +905,7 @@ export async function resolve(ref, options) {
       try { s = streamDeHtml(texto, id); } catch (e) { s = null; }
       // La página abrió pero vino VACÍA (la cara recordada entrega a veces
       // una versión sin vídeo): una vuelta más por la escalera desde abajo.
-      if (!s && i === 0 && Date.now() - inicio < 8000) {
+      if (!s && i <= 1 && Date.now() - inicio < 8000) {
         const ab2 = await abrirFacebook(intentos[i], 1800000, 9000, true, true);
         if (ab2.r) {
           trazaIntentos.push("vuelta:" + ab2.traza.join(","));
@@ -944,7 +961,27 @@ async function informarEnVivo(url) {
       " · HD: " + (u.hd ? "sí" : "no") + " · SD: " + (u.sd ? "sí" : "no");
   }
   const og = metaOg(html, "og:video:secure_url") || metaOg(html, "og:video:url") || metaOg(html, "og:video");
-  return paso + " · og:video: " + (og ? "sí" : "no") + " · id final: " + (idDeUrl(ab.r.url || url) || "no");
+  const idFin = idDeUrl(ab.r.url || url);
+  const cola = " · og:video: " + (og ? "sí" : "no") + " · id final: " + (idFin || "no");
+  // EL TESTIGO: si la página vino vacía y hay id, se interroga al
+  // reproductor público de Facebook (el de incrustar en webs, que no
+  // pide sesión): su respuesta dice si el vídeo existe fuera del muro.
+  if (videos.length === 0 && !og && idFin) {
+    try {
+      const t = await abrirFacebook(
+        "https://www.facebook.com/plugins/video.php?href=" +
+        encodeURIComponent("https://www.facebook.com/reel/" + idFin + "/"),
+        600000, 6000, true, true);
+      if (!t.r) return paso + cola + " · testigo: NINGUNA CARA (" + t.traza.join(",") + ")";
+      const th = t.r.text();
+      const tv = videosDeHtml(th);
+      const tieneMp4 = th.indexOf("playable_url") >= 0 || th.indexOf("hd_src") >= 0 ||
+        th.indexOf("browser_native") >= 0;
+      return paso + cola + " · testigo: " + t.traza.join("→") + " · " + th.length +
+        " caracteres · MP4: " + (tieneMp4 ? "sí" : "no") + " · vídeos: " + tv.length;
+    } catch (e) { /* al informe sin testigo */ }
+  }
+  return paso + cola;
 }
 
 async function informeDebug() {

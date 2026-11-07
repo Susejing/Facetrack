@@ -1,500 +1,632 @@
-// Kino plugin: Internet Archive (archive.org) — public-domain films and classic TV.
-// Declared hosts: archive.org and *.archive.org (downloads redirect to a storage node such as
-// dn720705.ca.archive.org).
+// FaceTrack — Facebook en Kino · github.com/Susejing/Facetrack
+// Copyright (C) 2026 Susejing
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-const BASE = "https://archive.org";
-const FIELDS = ["identifier", "title", "year", "description"];
-const VALID_ID = /^[A-Za-z0-9._-]{1,100}$/;
-const PLAYABLE_EXT = /\.(mp4|m4v|webm)$/i;
-const SUBTITLE_EXT = /\.(vtt|srt)$/i;
-// Preferred playable files, best first (archive.org's "format" field, lowercased).
-const FORMAT_RANK = ["h.264", "h.264 hd", "mpeg4", "512kb mpeg4"];
-const FILMS = "collection:(feature_films) AND mediatype:(movies)";
-const TV = "collection:(classic_tv) AND mediatype:(movies)";
-const CARTOONS = "collection:(animationandcartoons) AND mediatype:(movies)";
+// FaceTrack 0.1.0 — Facebook en Kino: vídeos públicos, nada más.
+//
+// Cómo funciona: Facebook entrega sus vídeos públicos como MP4 directo
+// escondidos en la página, dentro de bloques JSON <script data-sjs>
+// (el mismo que usa su web). Los enlaces de calidad alta están en
+// browser_native_hd_url y los ligeros en browser_native_sd_url, con
+// respaldo en playable_url y en el repartidor nuevo (progressive_urls).
+// Esos enlaces van FIRMADOS y CADUCAN al rato: por eso se resuelven al
+// momento de dar play, como hace TubeKino con YouTube.
+//
+// Qué trae la 0.1.0:
+//  • Pega un enlace de Facebook en el buscador de Kino (fb.watch,
+//    /watch/?v=, /videos/, /reel/, /share/v/...) y el vídeo sale directo.
+//  • Escribe el nombre de una página (lo que va tras facebook.com/) y
+//    salen sus vídeos.
+//  • En Ajustes guardas hasta 6 páginas tuyas y cada una es una fila
+//    del Inicio.
+//
+// Honestidad: Facebook cambia sus tripas cada cierto tiempo (los nombres
+// de los campos ya cambiaron una vez); si un día un vídeo no sale, el
+// plugin avisa con un mensaje claro en vez de quedarse mudo. La búsqueda
+// general de Facebook pide iniciar sesión: por ahora se buscan enlaces
+// pegados y páginas por nombre; el modo con tu cuenta (tu algoritmo, lo
+// que sueles ver) llegará después con la ventanita de sesión.
+//
+// Truco de descarga: los MP4 de Facebook limitan la velocidad cuando se
+// piden con el navegador normal; el reproductor los pide presentándose
+// como "facebookexternalhit/1.1" (el rastreador de vistas previas del
+// propio Facebook), que no está limitado.
 
-// kino.log never breaks what it reports on: in Kino 0.9.43 release builds a call to it threw (an R8 rename),
-// which would turn one failed row or title into a failed Home or search.
-function log(...args) {
-  try {
-    kino.log(...args);
-  } catch {
-    // nothing to do: the log line is lost, the result is not
+const VERSION = "0.1.0";
+
+// La cara con la que se piden las páginas (un Chrome de escritorio).
+const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+// La cara con la que el reproductor pide los MP4 (sin límite de velocidad).
+const UA_VIDEO = "facebookexternalhit/1.1";
+
+// Diagnóstico de la última jugada (se ve buscando "debug").
+let trazaBusqueda = "";
+let trazaHome = "";
+let trazaResolve = "";
+
+// Caché de los vídeos de cada página pedida (30 min): el Inicio y el
+// "Ver más" de una misma fila no gastan dos descargas iguales.
+var cachePag = {};
+
+// ---------- pedir páginas ----------
+
+async function pedir(url, tope) {
+  const r = await kino.fetch(url, {
+    headers: {
+      "User-Agent": UA_PAGINA,
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "es-ES,es;q=0.9,es-419;q=0.8,en;q=0.7"
+    },
+    timeoutMs: 14000,
+    maxBytes: tope || 1800000
+  });
+  if (!r.ok) throw kino.error("unavailable", "HTTP " + r.status + " en " + url.slice(0, 90));
+  return r;
+}
+
+// Quita el escape de un pedazo de cadena tal como viene en el JSON
+// (https:\/\/, \u0025...). Si no se puede, al menos se desenreda lo común.
+function soltar(s) {
+  if (!s) return "";
+  try { return JSON.parse('"' + s + '"'); } catch (e) { /* abajo */ }
+  return String(s)
+    .replace(/\\\//g, "/")
+    .replace(/\\u([0-9a-fA-F]{4})/g, function (m, h) { return String.fromCharCode(parseInt(h, 16)); });
+}
+
+// ---------- cazar vídeos en la página ----------
+
+// Los bloques <script data-sjs>{...}</script> de Facebook: ahí vive el
+// JSON con los vídeos (la misma ruta que sigue el extractor de yt-dlp,
+// la referencia viva de Facebook).
+function bloquesSjs(html) {
+  const fuera = [];
+  const rx = /<script[^>]*\bdata-sjs\b[^>]*>([\s\S]*?)<\/script>/g;
+  let m;
+  while ((m = rx.exec(html)) !== null) {
+    const cuerpo = m[1].trim();
+    if (cuerpo.length < 2 || cuerpo.charAt(0) !== "{") continue;
+    try { fuera.push(JSON.parse(cuerpo)); } catch (e) { /* bloque roto: al siguiente */ }
   }
+  return fuera;
 }
 
-function advancedUrl(query, rows, page = 1, sort = "downloads desc") {
-  const parts = ["q=" + encodeURIComponent(query)];
-  for (const f of FIELDS) parts.push("fl%5B%5D=" + f);
-  parts.push("sort%5B%5D=" + encodeURIComponent(sort), "rows=" + rows, "page=" + page, "output=json");
-  return BASE + "/advancedsearch.php?" + parts.join("&");
+// ¿Es este objeto un vídeo de Facebook?
+function esVideo(n) {
+  if (!n || typeof n !== "object" || Array.isArray(n)) return false;
+  if (n.__typename === "Video") return true;
+  // Algunas páginas traen el vídeo sin la etiqueta, pero con enlaces.
+  if ((n.browser_native_hd_url || n.browser_native_sd_url || n.playable_url || n.progressive_urls) &&
+      (n.id || n.videoId)) return true;
+  return false;
 }
 
-// Throws only AFTER its first await: in Kino a throw before a function's first await can't be
-// caught by its caller.
-async function getJson(url) {
-  const r = await kino.fetch(url);
-  if (!r.ok) throw new Error("archive.org respondió " + r.status);
-  return r.json();
+// Camina el JSON en busca de vídeos (con tope de nodos para no perder el tiempo).
+function caminar(nodo, fuera, cuenta) {
+  if (!nodo || typeof nodo !== "object" || cuenta.n > 250000) return;
+  cuenta.n = cuenta.n + 1;
+  if (Array.isArray(nodo)) {
+    for (let i = 0; i < nodo.length; i++) caminar(nodo[i], fuera, cuenta);
+    return;
+  }
+  if (esVideo(nodo)) fuera.push(nodo);
+  for (const k in nodo) caminar(nodo[k], fuera, cuenta);
 }
 
-function first(v) {
-  return Array.isArray(v) ? v[0] : v;
+// Todos los vídeos de una página, sin repetir id.
+function videosDeHtml(html) {
+  const nodos = [];
+  const cuenta = { n: 0 };
+  const bloques = bloquesSjs(html);
+  for (let i = 0; i < bloques.length; i++) caminar(bloques[i], nodos, cuenta);
+  const vistos = {};
+  const fuera = [];
+  for (let i = 0; i < nodos.length; i++) {
+    const id = String(nodos[i].id || nodos[i].videoId || "");
+    if (!id || vistos[id]) continue;
+    vistos[id] = 1;
+    fuera.push(nodos[i]);
+  }
+  return fuera;
 }
 
-function toItem(doc, kind) {
-  const description = [].concat(doc.description || []).join(" ").replace(/<[^>]*>/g, "").trim();
-  return {
-    id: doc.identifier,
-    ref: doc.identifier,
-    title: String(first(doc.title) || doc.identifier),
-    kind,
-    year: doc.year ? String(first(doc.year)) : undefined,
-    poster: BASE + "/services/img/" + encodeURIComponent(doc.identifier),
-    overview: description ? description.slice(0, 400) : undefined,
+// Respaldo plano: si el JSON no se dejó leer, los enlaces también se
+// encuentran a ojo en el HTML crudo.
+function urlsCrudas(html) {
+  const fuera = { hd: "", sd: "" };
+  const rx = /"(browser_native_hd_url|browser_native_sd_url|playable_url_quality_hd|playable_url)":"((?:[^"\\]|\\.)*)"/g;
+  let m;
+  while ((m = rx.exec(html)) !== null) {
+    const u = soltar(m[2]);
+    if (!u || u.indexOf("http") !== 0) continue;
+    if (/\.mpd(\?|$)/i.test(u) || /\.m3u8(\?|$)/i.test(u)) continue;
+    if (m[1] === "browser_native_hd_url" || m[1] === "playable_url_quality_hd") {
+      if (!fuera.hd) fuera.hd = u;
+    } else {
+      if (!fuera.sd) fuera.sd = u;
+    }
+  }
+  return fuera;
+}
+
+// Los enlaces de un vídeo, en orden de calidad: el repartidor viejo
+// (browser_native_* / playable_url) y el nuevo (progressive_urls).
+function urlsDeVideo(v) {
+  if (!v || typeof v !== "object") return { hd: "", sd: "" };
+  const campo = function (k) {
+    if (typeof v[k] === "string" && v[k]) return v[k];
+    const legado = v.videoDeliveryLegacyFields;
+    if (legado && typeof legado[k] === "string" && legado[k]) return legado[k];
+    return "";
   };
-}
-
-async function docs(query, rows, page = 1, sort) {
-  const data = await getJson(advancedUrl(query, rows, page, sort));
-  // A query archive.org can't parse still answers 200, with {"error": ...} instead of "response".
-  if (!data.response) throw new Error("archive.org no entendió la búsqueda");
-  return data.response.docs.filter((d) => VALID_ID.test(d.identifier));
-}
-
-// ---- The person's own addresses (Configurar: the "sources" list) ---------------------------------------
-const NEWEST = "addeddate desc";
-
-// One address: a collection or item (archive.org/details/<id>) or a search (archive.org/search?query=...).
-// Anything else, or another site, is left out: the plugin only ever talks to archive.org.
-function parseSource(raw) {
-  const text = String(raw || "").trim();
-  if (!text) return null;
-  let u;
-  try {
-    u = new URL(text);
-  } catch {
-    return null;
-  }
-  if (u.protocol !== "https:" && u.protocol !== "http:") return null;
-  if (u.hostname !== "archive.org" && !u.hostname.endsWith(".archive.org")) return null;
-  const details = /^\/details\/([^/?#]+)/.exec(u.pathname);
-  if (details) {
-    const id = decodeURIComponent(details[1]);
-    return VALID_ID.test(id) ? { kind: "details", id } : null;
-  }
-  if (u.pathname === "/search") {
-    const q = (u.searchParams.get("query") || u.searchParams.get("q") || "").trim();
-    if (q) return { kind: "search", query: q };
-  }
-  return null;
-}
-
-// Six url/cat slot pairs (url1, cat1 ... url6, cat6): plain settings every Kino since apiVersion 1 understands, so the
-// plugin installs on Kino versions without list settings (the `sources` list of 1.3.0-1.4.1 needed apiVersion 4).
-// Kino hands a plugin only the settings its manifest declares, so an old stored list never reaches this code.
-const SLOTS = 6;
-function sources() {
-  const out = [];
-  for (let i = 1; i <= SLOTS; i++) {
-    const s = parseSource(kino.config.get("url" + i));
-    // `id` is the archive.org identifier; `key` is this address's slot; `category` is the optional row name the person gave it.
-    if (s) out.push({ ...s, key: "src" + i, category: String(kino.config.get("cat" + i) || "").trim().slice(0, 60) });
-  }
-  return out;
-}
-
-// What a details address lists: the videos of a collection, or, when nothing is filed under it, that one item.
-// Asked once per address for as long as the runtime lives.
-const scopes = new Map();
-async function scopeInfo(source) {
-  if (source.kind === "search") return { query: "(" + source.query + ") AND mediatype:(movies)", item: false };
-  if (!scopes.has(source.key)) {
-    const collection = "collection:(" + source.id + ") AND mediatype:(movies)";
-    const inside = await docs(collection, 1);
-    scopes.set(source.key, inside.length ? { query: collection, item: false } : { query: "identifier:(" + source.id + ") AND mediatype:(movies)", item: true });
-  }
-  return scopes.get(source.key);
-}
-
-async function scopeOf(source) {
-  return (await scopeInfo(source)).query;
-}
-
-// An item address with several videos shows one card per video (a single video stays the item's one card). The card's id is
-// `<identifier>~<n>` (an id cannot hold `|`); its ref is `<identifier>|<file>`, which `resolve` already plays.
-const MAX_VIDEO_CARDS = 100;
-async function videoCards(identifier, doc) {
-  const meta = await metadata(identifier);
-  const originals = videoOriginals(meta.files);
-  if (originals.length < 2) return [];
-  const base = toItem(doc || { identifier, title: first(meta.metadata && meta.metadata.title) }, "movie");
-  return originals.slice(0, MAX_VIDEO_CARDS).map((f, i) => ({
-    ...base,
-    id: identifier + "~" + (i + 1),
-    ref: identifier + "|" + f.name,
-    title: (base.title + " · " + episodeTitle(f)).slice(0, 200),
-  }));
-}
-
-// The cards of a list of archive.org docs: the ones that are an item address with several videos are expanded.
-async function cardsOf(found, sourceList) {
-  const itemIds = new Set();
-  for (const s of sourceList) if (s.kind === "details" && (await scopeInfo(s)).item) itemIds.add(s.id);
-  const out = [];
-  for (const d of found) {
-    let parts = [];
-    if (itemIds.has(d.identifier)) {
-      try {
-        parts = await videoCards(d.identifier, d);
-      } catch (e) {
-        log("videos of", d.identifier, "failed", e.message);
-      }
+  let hd = campo("browser_native_hd_url") || campo("playable_url_quality_hd");
+  let sd = campo("browser_native_sd_url") || campo("playable_url");
+  const frag = v.videoDeliveryResponseFragment && v.videoDeliveryResponseFragment.videoDeliveryResponseResult;
+  const prog = frag && Array.isArray(frag.progressive_urls) ? frag.progressive_urls : [];
+  for (let i = 0; i < prog.length; i++) {
+    const p = prog[i] || {};
+    const u = typeof p.progressive_url === "string" ? p.progressive_url : "";
+    if (!u || u.indexOf("http") !== 0 || /\.mpd(\?|$)/i.test(u) || /\.m3u8(\?|$)/i.test(u)) continue;
+    const cal = (p.metadata && typeof p.metadata.quality === "string" ? p.metadata.quality : "").toUpperCase();
+    if (cal.indexOf("HD") >= 0 || cal.indexOf("1080") >= 0 || cal.indexOf("720") >= 0) {
+      if (!hd) hd = u;
+    } else {
+      if (!sd) sd = u;
     }
-    if (parts.length) out.push(...parts);
-    else out.push(toItem(d, "movie"));
   }
-  return out;
+  if (hd && /\.mpd(\?|$)/i.test(hd)) hd = "";
+  if (sd && /\.mpd(\?|$)/i.test(sd)) sd = "";
+  return { hd: hd, sd: sd };
 }
 
-async function titleOf(source) {
-  if (source.kind === "search") return ("Búsqueda: " + source.query).slice(0, 80);
-  try {
-    const data = await getJson(BASE + "/metadata/" + encodeURIComponent(source.id) + "/metadata");
-    const title = first(data && data.result && data.result.title);
-    if (title) return String(title).slice(0, 80);
-  } catch (e) {
-    log("title failed", source.id, e.message);
+// ---------- datos bonitos de un vídeo ----------
+
+function textoDe(x) {
+  if (!x) return "";
+  if (typeof x === "string") return x;
+  if (typeof x.text === "string") return x.text;
+  return "";
+}
+
+function tituloDe(v) {
+  const cs = v.creation_story;
+  const caminos = [
+    v.name,
+    v.savable_description,
+    cs && cs.comet_sections && cs.comet_sections.message && cs.comet_sections.message.story && cs.comet_sections.message.story.message,
+    v.message,
+    cs && cs.message
+  ];
+  for (let i = 0; i < caminos.length; i++) {
+    const t = textoDe(caminos[i]).trim();
+    if (t) return t;
   }
-  return source.id;
+  return "";
 }
 
-// The Home rows the addresses make: an address with a category joins the row of that category (same name, any capitals; the
-// row keeps the first spelling and is keyed by the first address's slot); an address without one is a row of its own.
-function ownRows() {
-  const out = [];
-  const byCategory = new Map();
-  for (const s of sources()) {
-    if (!s.category) {
-      out.push({ key: s.key, title: null, sources: [s] });
-      continue;
-    }
-    const name = s.category.toLowerCase();
-    if (!byCategory.has(name)) {
-      const row = { key: "cat" + s.key.slice(3), title: s.category, sources: [] };
-      byCategory.set(name, row);
-      out.push(row);
-    }
-    byCategory.get(name).sources.push(s);
-  }
-  return out;
+function duenoDe(v) {
+  const cs = v.creation_story;
+  const sfvc = cs && cs.short_form_video_context && cs.short_form_video_context.video_owner;
+  return textoDe(v.owner && v.owner.name) || textoDe(sfvc && sfvc.name);
 }
 
-// One archive.org query for a whole row (or for every address, in a search): its addresses' scopes, joined.
-async function queryOf(sourceList) {
-  const scopesOf = [];
-  for (const s of sourceList) scopesOf.push(await scopeOf(s));
-  return scopesOf.length === 1 ? scopesOf[0] : scopesOf.map((x) => "(" + x + ")").join(" OR ");
+function posterDe(v) {
+  const c1 = v.thumbnailImage && v.thumbnailImage.uri;
+  const c2 = v.preferred_thumbnail && v.preferred_thumbnail.image && v.preferred_thumbnail.image.uri;
+  if (typeof c1 === "string" && c1) return c1;
+  if (typeof c2 === "string" && c2) return c2;
+  return "";
 }
 
-// Letters, digits and apostrophes inside words only: any other character can be query syntax to
-// advancedsearch (a stray "/", "-", "&" or "'" makes it answer {"error": ...}). So are the words
-// and/or/not in any case (a dangling one is an error too); dropping them never changes which
-// titles match. Word edges are spelled out with \p{} classes: \b is ASCII-only, so it would cut
-// the "or" out of "Señor".
-function cleanTitle(raw) {
-  return String(raw || "")
-    .replace(/[^\p{L}\p{M}\p{N}' ]+/gu, " ")
-    .replace(/(?<![\p{L}\p{M}\p{N}])'|'(?![\p{L}\p{M}\p{N}])/gu, " ")
-    .replace(/(?<![\p{L}\p{M}\p{N}])(and|or|not)(?![\p{L}\p{M}\p{N}])/giu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+function haceTexto(segundos) {
+  if (!segundos || segundos <= 0) return "";
+  const paso = Math.floor(Date.now() / 1000) - segundos;
+  if (paso < 0) return "";
+  if (paso < 3600) return "hace " + Math.max(1, Math.floor(paso / 60)) + " min";
+  if (paso < 86400) return "hace " + Math.floor(paso / 3600) + " h";
+  if (paso < 2592000) return "hace " + Math.floor(paso / 86400) + " días";
+  return "hace " + Math.floor(paso / 2592000) + " meses";
 }
 
-// Lowercase letters and digits only, accents folded: how a title and an identifier are compared.
-function squash(text) {
-  const lower = String(text || "").toLowerCase();
-  return (typeof lower.normalize === "function" ? lower.normalize("NFKD") : lower).replace(/[^a-z0-9]/g, "");
-}
-
-// How many forms of the title are asked of archive.org: what was typed, the original title and at
-// most two of Kino's other titles. Each form is two requests (films and TV), all sent at once, so a
-// search stays far under the 60 requests and 15 seconds of one call.
-const MAX_FORMS = 4;
-
-// The forms of the title archive.org is asked, best first, one per distinct text: `q`, then
-// `originalTitle`, then `altTitles`. Each is cut to its head (kino.rank.shortQuery: up to the first
-// ":", "," ...), because archive.org's title search wants every word, and a subtitle Kino's title
-// has ("Nosferatu, el vampiro") is rarely in archive.org's.
-function titleForms(query) {
-  const out = [];
-  const seen = new Set();
-  const given = [query.q, query.originalTitle].concat(Array.isArray(query.altTitles) ? query.altTitles : []);
-  for (const raw of given) {
-    if (out.length >= MAX_FORMS) break;
-    if (typeof raw !== "string" || !raw.trim()) continue;
-    const text = cleanTitle(kino.rank.shortQuery(raw));
-    const key = squash(text);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(text);
-  }
-  return out;
-}
-
-// With the year known, what is from that year (give or take one) goes first, then what has no
-// year, then the rest. Only an order: archive.org's years are often an upload's, and a remake is
-// still a real answer. Stable, so archive.org's own order (most downloaded) stays among equals.
-function byYear(items, year) {
-  const wanted = Number(year) || 0;
-  if (!wanted) return items;
-  const place = (item) => {
-    const y = parseInt(item.year, 10);
-    if (!y) return 1;
-    return Math.abs(y - wanted) <= 1 ? 0 : 2;
+// Un nodo de vídeo convertido en tarjeta de Kino.
+function itemDeVideo(v, nombrePagina, posterRespaldo) {
+  const id = String(v.id || v.videoId || "");
+  if (!id) return null;
+  const urls = urlsDeVideo(v);
+  // Sin enlaces solo se acepta si el nodo es un Video de verdad:
+  // al reproducir se vuelve a pedir la página de todas formas.
+  if (!urls.hd && !urls.sd && v.__typename !== "Video") return null;
+  const titulo = tituloDe(v).trim();
+  const dueno = (duenoDe(v) || nombrePagina || "").trim();
+  const item = {
+    id: "fbv." + id,
+    ref: "v:" + id,
+    title: (titulo || "Video de Facebook").slice(0, 140),
+    kind: "movie"
   };
-  return items.map((item, i) => ({ item, i, p: place(item) })).sort((a, b) => a.p - b.p || a.i - b.i).map((x) => x.item);
+  const poster = posterDe(v) || posterRespaldo || "";
+  if (poster) item.poster = poster;
+  if (dueno) item.originalTitle = dueno.slice(0, 120);
+  const partes = [];
+  if (dueno) partes.push("Página: " + dueno);
+  const hace = haceTexto(typeof v.creation_time === "number" ? v.creation_time : 0);
+  if (hace) partes.push(hace);
+  const desc = textoDe(v.savable_description).trim();
+  if (desc && desc !== titulo) partes.push(desc);
+  if (partes.length) item.overview = partes.join(" · ").slice(0, 300);
+  const ms = typeof v.playable_duration_in_ms === "number" ? v.playable_duration_in_ms : 0;
+  if (ms >= 60000) item.runtimeMinutes = Math.min(1000, Math.round(ms / 60000));
+  if (typeof v.creation_time === "number" && v.creation_time > 0) {
+    item.year = new Date(v.creation_time * 1000).getUTCFullYear();
+  }
+  return item;
 }
+
+// ---------- meta etiquetas (respaldo) ----------
+
+function metaOg(html, propiedad) {
+  const rx1 = new RegExp('<meta[^>]+property=["\']' + propiedad + '["\'][^>]+content=["\']([^"\']*)["\']', "i");
+  const m1 = rx1.exec(html);
+  if (m1) return soltar(m1[1]);
+  const rx2 = new RegExp('<meta[^>]+content=["\']([^"\']*)["\'][^>]+property=["\']' + propiedad + '["\']', "i");
+  const m2 = rx2.exec(html);
+  return m2 ? soltar(m2[1]) : "";
+}
+
+// ---------- enlaces pegados ----------
+
+// ¿Es esto un enlace de Facebook? Acepta con y sin https://.
+function enlaceFacebook(q) {
+  let s = String(q || "").trim();
+  if (!s) return null;
+  if (!/^https?:\/\//i.test(s)) {
+    if (/^(?:www\.|m\.|web\.)?(?:facebook\.com|fb\.watch|fb\.me)\//i.test(s)) s = "https://" + s;
+    else return null;
+  }
+  if (!/(?:facebook\.com|fb\.watch|fb\.me)/i.test(s)) return null;
+  return s;
+}
+
+// El ítem de un enlace pegado: se abre la página y se lee su vídeo.
+async function itemDeEnlace(url) {
+  trazaBusqueda = "enlace pegado: " + url.slice(0, 80);
+  const r = await pedir(url, 1800000);
+  const html = r.text();
+  const videos = videosDeHtml(html);
+  const posterOg = metaOg(html, "og:image");
+  if (videos.length > 0) {
+    const it = itemDeVideo(videos[0], "", posterOg);
+    if (it) return [it];
+  }
+  // Respaldo: algunas páginas de vídeo anuncian el MP4 en las meta etiquetas.
+  const og = metaOg(html, "og:video:secure_url") || metaOg(html, "og:video:url") || metaOg(html, "og:video");
+  const tituloOg = metaOg(html, "og:title") || "Video de Facebook";
+  if (og) {
+    return [{
+      id: "fbv." + hashDe(og),
+      ref: "u:" + url,
+      title: tituloOg.slice(0, 140),
+      kind: "movie",
+      poster: posterOg || undefined,
+      overview: "Enlace pegado · se resuelve al reproducir"
+    }];
+  }
+  throw kino.error("not_found", "sin vídeo en " + url.slice(0, 90), {
+    userMessage: "Ese enlace no trajo un vídeo: puede ser privado, haberse borrado o pedir iniciar sesión."
+  });
+}
+
+// ---------- páginas por nombre ----------
+
+function slugDe(s) {
+  let u = String(s || "").trim();
+  if (!u) return "";
+  let m = /^https?:\/\/[^\/]+\/([^\/?#]+)/i.exec(u);
+  if (m) u = m[1];
+  else {
+    const m2 = /^(?:www\.|m\.|web\.)?facebook\.com\/([^\/?#]+)/i.exec(u);
+    if (m2) u = m2[1];
+  }
+  u = u.replace(/\/+$/, "");
+  if (!/^[A-Za-z0-9.\-_]{2,60}$/.test(u)) return "";
+  // Direcciones que NO son páginas de nadie.
+  if (/^(?:watch|reel|share|video|videos|story|stories|groups|marketplace|events|pages|login|profile|people|public|hashtag|search|gaming|reels)$/i.test(u)) return "";
+  return u;
+}
+
+// Los vídeos de una página (con caché de 30 min). Si la pestaña de vídeos
+// no trae nada, se prueba la raíz de la página: los vídeos de sus
+// publicaciones también viven en el JSON.
+async function videosDePagina(slug) {
+  const c = cachePag[slug];
+  if (c && Date.now() - c.t < 1800000) return c.nodos;
+  let nodos = [];
+  const urls = [
+    "https://www.facebook.com/" + slug + "/videos/",
+    "https://www.facebook.com/" + slug + "/"
+  ];
+  for (let i = 0; i < urls.length && nodos.length === 0; i++) {
+    try {
+      const r = await pedir(urls[i], 1800000);
+      nodos = videosDeHtml(r.text());
+    } catch (e) { /* a la siguiente */ }
+  }
+  // Los más nuevos primero cuando se sabe cuándo se publicaron.
+  nodos.sort(function (a, b) {
+    const ta = typeof a.creation_time === "number" ? a.creation_time : 0;
+    const tb = typeof b.creation_time === "number" ? b.creation_time : 0;
+    return tb - ta;
+  });
+  cachePag[slug] = { nodos: nodos, t: Date.now() };
+  const claves = Object.keys(cachePag);
+  if (claves.length > 8) {
+    claves.sort(function (x, y) { return cachePag[x].t - cachePag[y].t; });
+    while (claves.length > 8) delete cachePag[claves.shift()];
+  }
+  return nodos;
+}
+
+async function itemsDePagina(slug, limite, nombrePagina) {
+  const nodos = await videosDePagina(slug);
+  const items = [];
+  for (let i = 0; i < nodos.length && items.length < limite; i++) {
+    const it = itemDeVideo(nodos[i], nombrePagina, "");
+    if (it) items.push(it);
+  }
+  return items;
+}
+
+// Las páginas guardadas en Ajustes (hasta 6).
+function paginasGuardadas() {
+  const fuera = [];
+  for (let i = 1; i <= 6; i++) {
+    const bruto = String(kino.config.get("pag" + i) || "").trim();
+    if (!bruto) continue;
+    const slug = slugDe(bruto);
+    if (!slug) continue;
+    fuera.push({ slug: slug, nombre: String(kino.config.get("fila" + i) || "").trim() });
+  }
+  return fuera;
+}
+
+// ---------- el buscador de Kino ----------
 
 export async function search(query) {
-  const forms = titleForms(query);
-  if (!forms.length) return [];
-  const text = forms[0];
-  const titleQuery = (form) => "title:(" + form + ")";
-  const anyTitle = forms.length === 1 ? titleQuery(text) : "(" + forms.map(titleQuery).join(" OR ") + ")";
-  // Both collections are always searched: `type` is only a hint. Kino sends it from TMDB's movie/tv
-  // split, which does not line up with archive.org's (public-domain films and classic TV are mixed,
-  // and a title can be in both), so filtering by it lost real matches. It only decides which group
-  // comes first.
-  const groups = [
-    { kind: "movie", where: FILMS },
-    { kind: "series", where: TV },
-  ];
-  if (query.type === "series") groups.reverse();
-  const out = [];
-  const seen = new Set();
-  // What is inside the person's own addresses comes first, as archive.org lists it: the person chose
-  // those addresses, so nothing there is ranked away.
-  const mine = sources();
-  if (mine.length) {
-    try {
-      const hits = (await docs(anyTitle + " AND (" + (await queryOf(mine)) + ")", 25)).filter((d) => !seen.has(d.identifier));
-      for (const card of await cardsOf(hits, mine)) {
-        if (seen.has(card.id)) continue;
-        seen.add(card.id);
-        out.push(card);
-      }
-      // An item address with several videos is also searched by its videos' own titles.
-      const wordLists = forms.map((f) => f.toLowerCase().split(" "));
-      for (const s of mine) {
-        if (s.kind !== "details" || !(await scopeInfo(s)).item) continue;
-        for (const card of await videoCards(s.id)) {
-          const title = card.title.toLowerCase();
-          if (seen.has(card.id) || !wordLists.some((words) => words.every((w) => title.includes(w)))) continue;
-          seen.add(card.id);
-          out.push(card);
-        }
-      }
-    } catch (e) {
-      log("search in the person's addresses failed", e.message);
-    }
+  const q = query && query.q ? String(query.q).trim() : "";
+  if (!q) return [];
+
+  // Informe técnico (como en TubeKino): escribir "debug" o "estado".
+  const ql = q.toLowerCase();
+  if (ql === "debug" || ql === "estado") return informeDebug();
+
+  // ¿Enlace pegado de Facebook?
+  const enlace = enlaceFacebook(q);
+  if (enlace) return await itemDeEnlace(enlace);
+
+  // ¿Nombre de una página? (los nombres de Facebook no llevan espacios)
+  if (/^[A-Za-z0-9.\-_]{2,60}$/.test(q)) {
+    trazaBusqueda = "página: " + q;
+    const items = await itemsDePagina(q, 30, "");
+    if (items.length > 0) return items;
+    throw kino.error("not_found", "página sin vídeos: " + q, {
+      userMessage: "No encontré vídeos públicos de esa página (o no existe). El nombre es lo que va tras facebook.com/, sin espacios."
+    });
   }
-  // Every form in both collections, all at once. A form archive.org fails on is left out; only when
-  // every one fails does the search fail.
-  const asks = [];
-  for (const group of groups) {
-    for (const form of forms) {
-      asks.push(
-        (async () => {
-          try {
-            return { group, found: await docs(titleQuery(form) + " AND " + group.where, 25) };
-          } catch (e) {
-            return { group, error: e };
-          }
-        })()
-      );
-    }
-  }
-  const answers = await Promise.all(asks);
-  if (answers.every((a) => a.error)) throw answers[0].error;
-  const found = [];
-  for (const a of answers) {
-    if (a.error) {
-      log("search failed for one title", a.error.message);
-      continue;
-    }
-    for (const d of a.found) {
-      // An item can be in both collections, or be found by several forms: it is listed once, as the
-      // kind of the group that came first.
-      if (seen.has(d.identifier)) continue;
-      seen.add(d.identifier);
-      found.push(toItem(d, a.group.kind));
-    }
-  }
-  // Ranked against every title Kino knows for the work and every form asked: what shares most of
-  // their words first, a near-miss dropped. An item whose identifier is one of those titles exactly
-  // ("nosferatu" for "Nosferatu") always stays.
-  const titles = [query.q, query.originalTitle]
-    .concat(Array.isArray(query.altTitles) ? query.altTitles : [], forms)
-    .filter((t) => typeof t === "string" && t.trim());
-  const exact = new Set(titles.map(squash).filter(Boolean));
-  const relevant = new Set(kino.rank.filterRelevant(found, titles));
-  const kept = found.filter((item) => relevant.has(item) || exact.has(squash(item.id)));
-  return out.concat(kino.rank.sortBySimilarity(byYear(kept, query.year), titles));
+
+  trazaBusqueda = "búsqueda general (pide sesión): rechazada";
+  throw kino.error("not_found", "búsqueda no compatible: " + q.slice(0, 60), {
+    userMessage: "La búsqueda general de Facebook pide iniciar sesión. Pega un enlace de vídeo o escribe el nombre EXACTO de una página (sin espacios)."
+  });
 }
 
-// Home rows; each one's id is also its "Ver más" ref (the browse capability).
-const ROWS = [
-  { id: "films", title: "Películas de dominio público", query: FILMS, kind: "movie" },
-  { id: "tv", title: "Televisión clásica", query: TV, kind: "series" },
-  { id: "cartoons", title: "Animación clásica", query: CARTOONS, kind: "movie" },
-];
-const ROW_SIZE = 30;
-const PAGE_SIZE = 50;
+// ---------- el Inicio ----------
 
 export async function home() {
-  const out = [];
-  // The person's own addresses, newest first, before the plugin's own rows.
-  for (const row of ownRows()) {
+  const pags = paginasGuardadas();
+  const inicio = Date.now();
+  const filas = [];
+  let ok = 0;
+  for (let i = 0; i < pags.length; i++) {
+    // El Inicio tiene un presupuesto de tiempo: si ya va tarde, las filas
+    // que falten se quedan para la próxima (la caché ayuda).
+    if (Date.now() - inicio > 13000 && filas.length > 0) break;
     try {
-      const found = await docs(await queryOf(row.sources), ROW_SIZE, 1, NEWEST);
-      if (found.length) out.push({ id: row.key, title: row.title || (await titleOf(row.sources[0])), ref: row.key, items: await cardsOf(found, row.sources) });
-    } catch (e) {
-      log("home row failed", row.key, e.message);
-    }
+      const items = await itemsDePagina(pags[i].slug, 14, pags[i].nombre);
+      if (items.length > 0) {
+        ok = ok + 1;
+        filas.push({
+          id: "fila." + pags[i].slug.replace(/[^A-Za-z0-9._~-]/g, "-"),
+          title: pags[i].nombre || pags[i].slug,
+          items: items,
+          ref: "pg:" + pags[i].slug,
+          genre: "otros"
+        });
+      }
+    } catch (e) { /* fila omitida, las demás siguen */ }
   }
-  for (const row of ROWS) {
-    try {
-      const found = await docs(row.query, ROW_SIZE);
-      out.push({ id: row.id, title: row.title, ref: row.id, items: found.map((d) => toItem(d, row.kind)) });
-    } catch (e) {
-      log("home row failed", row.id, e.message);
-    }
+  trazaHome = "portada: " + ok + "/" + pags.length + " páginas con vídeos";
+  if (filas.length === 0) {
+    const mensaje = pags.length === 0
+      ? "Sin páginas todavía: en Ajustes guarda hasta 6 páginas tuyas (el nombre que va tras facebook.com/) y cada una será una fila aquí."
+      : "Ninguna de tus páginas trajo vídeos públicos ahora mismo. Revisa los nombres en Ajustes o prueba de nuevo en un rato.";
+    throw kino.error("unavailable", "home sin filas", { userMessage: mensaje });
   }
-  return out;
+  return filas;
 }
 
-// "Ver más" on a Home row: the same query, a page at a time. The cursor is the next page number.
+// ---------- Ver más de una fila ----------
+
 export async function browse(ref, cursor) {
-  await null; // the checks below may throw: never before the first await
-  const own = ownRows().find((r) => r.key === ref);
-  const row = own || ROWS.find((r) => r.id === ref);
-  if (!row) throw kino.error("not_found", "esa fila ya no existe");
-  const page = cursor ? Number(cursor) : 1;
-  if (!Number.isInteger(page) || page < 1 || page > 100) throw kino.error("not_found", "página inválida");
-  const found = own ? await docs(await queryOf(own.sources), PAGE_SIZE, page, NEWEST) : await docs(row.query, PAGE_SIZE, page);
-  return { items: own ? await cardsOf(found, own.sources) : found.map((d) => toItem(d, row.kind)), next: found.length === PAGE_SIZE ? String(page + 1) : undefined };
-}
-
-async function metadata(id) {
-  const data = await getJson(BASE + "/metadata/" + encodeURIComponent(id));
-  if (!data || !Array.isArray(data.files)) throw new Error("archive.org no tiene ese item");
-  return data;
-}
-
-// "Season 2" after "Season 10" is wrong; compare digit runs as numbers.
-function natural(a, b) {
-  const x = a.split(/(\d+)/);
-  const y = b.split(/(\d+)/);
-  for (let i = 0; i < Math.min(x.length, y.length); i++) {
-    if (x[i] === y[i]) continue;
-    if (i % 2 === 1) return Number(x[i]) - Number(y[i]);
-    return x[i] < y[i] ? -1 : 1;
+  ref = String(ref || "");
+  if (ref.indexOf("pg:") === 0) {
+    const slug = ref.slice(3);
+    const nodos = await videosDePagina(slug);
+    const desde = cursor ? (parseInt(cursor, 10) || 0) : 0;
+    const items = [];
+    for (let i = desde; i < nodos.length && items.length < 15; i++) {
+      const it = itemDeVideo(nodos[i], "", "");
+      if (it) items.push(it);
+    }
+    const pagina = { items: items };
+    if (items.length > 0 && desde + items.length < nodos.length) {
+      pagina.next = String(desde + items.length);
+    }
+    return pagina;
   }
-  return x.length - y.length;
+  throw kino.error("not_found", "browse ref " + ref.slice(0, 60));
 }
 
-// A video is an original file something playable exists for: itself (mp4/m4v/webm) or a derivative
-// made from it (its `original` field). The extension of the original tells nothing: real items
-// hold .avi, .mpg, .mkv and .divx originals next to their derived mp4.
-function videoOriginals(files) {
-  const playable = new Set();
-  for (const f of files) {
-    if (!PLAYABLE_EXT.test(f.name)) continue;
-    const from = f.source === "original" ? f.name : f.original;
-    if (from) playable.add(from);
-  }
-  return files
-    .filter((f) => f.source === "original" && playable.has(f.name))
-    .sort((a, b) => natural(a.name, b.name));
-}
+// ---------- reproducir: aquí se consiguen los MP4 ----------
 
-function stem(name) {
-  return name.replace(/\.[^./]+$/, "");
-}
-
-function rank(f) {
-  const i = FORMAT_RANK.indexOf(String(f.format || "").toLowerCase());
-  return i === -1 ? FORMAT_RANK.length : i;
-}
-
-function bestPlayable(files, original) {
-  const family = files.filter((f) => (f.name === original.name || f.original === original.name) && PLAYABLE_EXT.test(f.name));
-  family.sort((a, b) => rank(a) - rank(b));
-  return family[0] || null;
-}
-
-function downloadUrl(id, name) {
-  return BASE + "/download/" + encodeURIComponent(id) + "/" + name.split("/").map(encodeURIComponent).join("/");
-}
-
-function subtitlesFor(id, files, original) {
-  const base = stem(original.name) + ".";
-  return files
-    .filter((f) => SUBTITLE_EXT.test(f.name) && f.name.startsWith(base))
-    .map((f) => ({
-      lang: /[._](es|spa|spanish)[._]/i.test(f.name) ? "es" : "en",
-      url: downloadUrl(id, f.name),
-      format: /\.srt$/i.test(f.name) ? "srt" : "vtt",
-    }));
-}
-
-function numbering(originals) {
-  const found = originals.map((f) => /S(\d{1,3})E(\d{1,4})/i.exec(f.name));
-  if (found.every((m) => m)) return found.map((m) => ({ season: Number(m[1]), number: Number(m[2]) }));
-  return originals.map((_, i) => ({ season: 1, number: i + 1 }));
-}
-
-function episodeTitle(f) {
-  if (f.title) return String(f.title);
-  const name = stem(f.name.split("/").pop());
-  const m = /S\d{1,3}E\d{1,4}\s*-\s*(.+)$/i.exec(name);
-  return m ? m[1] : name;
-}
-
-export async function episodes(ref) {
-  const meta = await metadata(ref);
-  const originals = videoOriginals(meta.files);
-  const numbers = numbering(originals);
-  return {
-    series: {
-      title: String(first(meta.metadata && meta.metadata.title) || ref),
-      poster: BASE + "/services/img/" + encodeURIComponent(ref),
+function streamDe(hd, sd, nodo) {
+  const stream = {
+    url: hd || sd,
+    mime: "video/mp4",
+    headers: {
+      "User-Agent": UA_VIDEO,
+      "Referer": "https://www.facebook.com/"
     },
-    episodes: originals.map((f, i) => ({
-      season: numbers[i].season,
-      number: numbers[i].number,
-      ref: ref + "|" + f.name,
-      title: episodeTitle(f),
-    })),
+    expiresInSeconds: 1800,
+    label: hd ? "HD" : "SD"
+  };
+  if (hd && sd && sd !== hd) {
+    stream.alternatives = [{ url: sd, mime: "video/mp4", label: "SD" }];
+  }
+  const ms = nodo && typeof nodo.playable_duration_in_ms === "number" ? nodo.playable_duration_in_ms : 0;
+  if (ms > 0) stream.durationMs = Math.round(ms);
+  return stream;
+}
+
+// De una página de vídeo ya descargada: el stream listo para Kino.
+function streamDeHtml(html, id) {
+  const nodos = videosDeHtml(html);
+  let nodo = null;
+  if (id) {
+    for (let j = 0; j < nodos.length; j++) {
+      if (String(nodos[j].id || nodos[j].videoId || "") === id) { nodo = nodos[j]; break; }
+    }
+    if (!nodo && nodos.length === 1) nodo = nodos[0];
+  } else if (nodos.length > 0) {
+    nodo = nodos[0];
+  }
+  let hd = "";
+  let sd = "";
+  if (nodo) {
+    const u = urlsDeVideo(nodo);
+    hd = u.hd;
+    sd = u.sd;
+  }
+  const crudas = urlsCrudas(html);
+  if (!hd && crudas.hd) hd = crudas.hd;
+  if (!sd && crudas.sd) sd = crudas.sd;
+  if (!hd && !sd) {
+    // Última red: algunas páginas de vídeo lo anuncian en las meta etiquetas.
+    const og = metaOg(html, "og:video:secure_url") || metaOg(html, "og:video:url") || metaOg(html, "og:video");
+    if (og) hd = og;
+  }
+  if (!hd && !sd) throw kino.error("not_found", "página sin vídeo reproducible" + (id ? " " + id : ""));
+  return streamDe(hd, sd, nodo);
+}
+
+export async function resolve(ref, options) {
+  ref = String(ref || "");
+  trazaResolve = "ref " + ref.slice(0, 70);
+
+  // Enlace completo guardado (cuando no había id numérico).
+  if (ref.indexOf("u:") === 0) {
+    const url = ref.slice(2);
+    const r = await pedir(url, 1800000);
+    try {
+      return streamDeHtml(r.text(), null);
+    } catch (e) {
+      throw kino.error("not_found", "enlace sin vídeo: " + String(e && e.message ? e.message : e).slice(0, 120), {
+        userMessage: "Facebook no entregó este vídeo: puede ser privado, haberse borrado o pedir iniciar sesión."
+      });
+    }
+  }
+
+  // id de vídeo: se pide la página canónica del vídeo y de ahí salen
+  // los MP4 firmados (caducan: por eso se resuelve al reproducir).
+  if (ref.indexOf("v:") === 0) {
+    const id = ref.slice(2);
+    const intentos = [
+      "https://www.facebook.com/video/video.php?v=" + encodeURIComponent(id),
+      "https://m.facebook.com/watch/?v=" + encodeURIComponent(id) + "&_rnr"
+    ];
+    let ultimo = null;
+    for (let i = 0; i < intentos.length; i++) {
+      let h = "";
+      try {
+        h = (await pedir(intentos[i], 1800000)).text();
+      } catch (e) {
+        ultimo = e;
+        continue;
+      }
+      try {
+        const s = streamDeHtml(h, id);
+        trazaResolve = "v:" + id + " → MP4 " + (s.label || "") + " (intento " + (i + 1) + ")";
+        return s;
+      } catch (e) {
+        ultimo = e;
+      }
+    }
+    throw kino.error("not_found", "Facebook no entregó el vídeo " + id + ": " +
+      (ultimo ? String(ultimo && ultimo.message ? ultimo.message : ultimo).slice(0, 120) : "sin enlaces"), {
+      userMessage: "Facebook no entregó este vídeo: puede ser privado, haberse borrado o pedir iniciar sesión."
+    });
+  }
+
+  throw kino.error("not_found", "ref no es un vídeo: " + ref.slice(0, 60));
+}
+
+// ---------- Ajustes ----------
+
+export async function settingsStatus() {
+  const n = paginasGuardadas().length;
+  return {
+    estado: ("FaceTrack " + VERSION + ". " + n + " página(s) guardadas. " +
+      "Pega enlaces de Facebook en el buscador o escribe el nombre de una página.").slice(0, 200)
   };
 }
 
-export async function resolve(ref) {
-  const cut = ref.indexOf("|");
-  const id = cut === -1 ? ref : ref.slice(0, cut);
-  const wanted = cut === -1 ? null : ref.slice(cut + 1);
-  const meta = await metadata(id);
-  const originals = videoOriginals(meta.files);
-  const original = wanted ? originals.find((f) => f.name === wanted) : originals[0];
-  if (!original) throw new Error("este item no tiene video");
-  const file = bestPlayable(meta.files, original);
-  if (!file) throw new Error("no hay una versión que se pueda reproducir (mp4 o webm)");
-  const seconds = Number(file.length || original.length || 0);
-  return {
-    url: downloadUrl(id, file.name),
-    mime: /\.webm$/i.test(file.name) ? "video/webm" : "video/mp4",
-    subtitles: subtitlesFor(id, meta.files, original),
-    durationMs: seconds > 0 ? Math.round(seconds * 1000) : undefined,
-  };
+// ---------- informe técnico (buscando "debug") ----------
+
+function informeDebug() {
+  const pags = paginasGuardadas();
+  const lineas = [
+    "FaceTrack " + VERSION + " — informe",
+    "Páginas guardadas: " + pags.length + (pags.length ? " (" + pags.map(function (p) { return p.slug; }).join(", ") + ")" : ""),
+    "Última búsqueda: " + (trazaBusqueda || "—"),
+    "Último Inicio: " + (trazaHome || "—"),
+    "Última reproducción: " + (trazaResolve || "—"),
+    "Caché de páginas: " + Object.keys(cachePag).length
+  ];
+  return [{
+    id: "fbv.debug",
+    ref: "debug",
+    title: "FaceTrack — informe técnico",
+    kind: "movie",
+    overview: lineas.join(" · ")
+  }];
+}
+
+// ---------- herramientas pequeñas ----------
+
+function hashDe(s) {
+  let h = 5381;
+  const t = String(s || "");
+  for (let i = 0; i < t.length; i++) h = ((h << 5) + h + t.charCodeAt(i)) & 0x7fffffff;
+  return h.toString(36);
 }

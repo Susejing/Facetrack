@@ -1,98 +1,30 @@
 {
-  "id": "archive-org",
-  "name": "Internet Archive",
-  "version": "1.4.2",
-  "apiVersion": 3,
+  "id": "facetrack",
+  "name": "FaceTrack — Facebook",
+  "version": "0.1.0",
+  "apiVersion": 19,
   "entry": "plugin.js",
-  "description": "Películas de dominio público y televisión clásica de archive.org",
-  "author": "kinotvapp",
-  "homepage": "https://github.com/kinotvapp/kino-plugin-archive",
-  "hosts": [
-    "archive.org",
-    "*.archive.org"
-  ],
-  "capabilities": [
-    "search",
-    "home",
-    "browse",
-    "episodes",
-    "resolve",
-    "download"
-  ],
-  "color": "#E0A030",
+  "description": "Vídeos de Facebook en Kino: pega enlaces (fb.watch, watch, reels, share) en el buscador y salta directo al vídeo, o escribe el nombre de una página para ver sus vídeos públicos. Hasta 6 páginas tuyas como filas del Inicio. Calidad alta cuando Facebook la trae; los enlaces se resuelven al momento de reproducir.",
+  "author": "Susejing",
+  "homepage": "https://github.com/Susejing/Facetrack",
+  "hosts": ["facebook.com", "*.facebook.com", "fb.watch", "*.fb.watch", "fb.me", "*.fb.me", "fbcdn.net", "*.fbcdn.net"],
+  "capabilities": ["search", "home", "browse", "resolve"],
+  "color": "#1877F2",
   "icon": "icon.png",
   "settings": [
-    {
-      "key": "url1",
-      "label": "Dirección 1",
-      "type": "url",
-      "hint": "https://archive.org/details/… o una búsqueda"
-    },
-    {
-      "key": "cat1",
-      "label": "Categoría 1",
-      "type": "text",
-      "hint": "Opcional: nombre de la fila en el Home"
-    },
-    {
-      "key": "url2",
-      "label": "Dirección 2",
-      "type": "url",
-      "hint": "https://archive.org/details/… o una búsqueda"
-    },
-    {
-      "key": "cat2",
-      "label": "Categoría 2",
-      "type": "text",
-      "hint": "Opcional: nombre de la fila en el Home"
-    },
-    {
-      "key": "url3",
-      "label": "Dirección 3",
-      "type": "url",
-      "hint": "https://archive.org/details/… o una búsqueda"
-    },
-    {
-      "key": "cat3",
-      "label": "Categoría 3",
-      "type": "text",
-      "hint": "Opcional: nombre de la fila en el Home"
-    },
-    {
-      "key": "url4",
-      "label": "Dirección 4",
-      "type": "url",
-      "hint": "https://archive.org/details/… o una búsqueda"
-    },
-    {
-      "key": "cat4",
-      "label": "Categoría 4",
-      "type": "text",
-      "hint": "Opcional: nombre de la fila en el Home"
-    },
-    {
-      "key": "url5",
-      "label": "Dirección 5",
-      "type": "url",
-      "hint": "https://archive.org/details/… o una búsqueda"
-    },
-    {
-      "key": "cat5",
-      "label": "Categoría 5",
-      "type": "text",
-      "hint": "Opcional: nombre de la fila en el Home"
-    },
-    {
-      "key": "url6",
-      "label": "Dirección 6",
-      "type": "url",
-      "hint": "https://archive.org/details/… o una búsqueda"
-    },
-    {
-      "key": "cat6",
-      "label": "Categoría 6",
-      "type": "text",
-      "hint": "Opcional: nombre de la fila en el Home"
-    }
+    { "key": "paginas", "label": "Tus páginas", "type": "section", "hint": "Hasta 6 páginas de Facebook. En cada una escribe su nombre (lo que va tras facebook.com/, ej: Crunchyroll) o pega su enlace. Cada página será una fila del Inicio. Los enlaces de vídeos sueltos se pegan directo en el buscador de Kino." },
+    { "key": "pag1", "label": "Página 1", "type": "text", "hint": "Nombre de la página o su enlace" },
+    { "key": "fila1", "label": "Nombre de la fila 1", "type": "text", "hint": "Opcional: cómo se llama la fila en el Inicio" },
+    { "key": "pag2", "label": "Página 2", "type": "text", "hint": "Nombre de la página o su enlace" },
+    { "key": "fila2", "label": "Nombre de la fila 2", "type": "text", "hint": "Opcional" },
+    { "key": "pag3", "label": "Página 3", "type": "text", "hint": "Nombre de la página o su enlace" },
+    { "key": "fila3", "label": "Nombre de la fila 3", "type": "text", "hint": "Opcional" },
+    { "key": "pag4", "label": "Página 4", "type": "text", "hint": "Nombre de la página o su enlace" },
+    { "key": "fila4", "label": "Nombre de la fila 4", "type": "text", "hint": "Opcional" },
+    { "key": "pag5", "label": "Página 5", "type": "text", "hint": "Nombre de la página o su enlace" },
+    { "key": "fila5", "label": "Nombre de la fila 5", "type": "text", "hint": "Opcional" },
+    { "key": "pag6", "label": "Página 6", "type": "text", "hint": "Nombre de la página o su enlace" },
+    { "key": "fila6", "label": "Nombre de la fila 6", "type": "text", "hint": "Opcional" },
+    { "key": "estado", "label": "Estado", "type": "status" }
   ]
 }

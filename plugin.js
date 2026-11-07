@@ -14,6 +14,28 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+// FaceTrack 0.3.0 — la memoria del plugin.
+//
+// VEREDICTO con el que se construye esta versión: la búsqueda por
+// palabras de Facebook quedó CERRADA con evidencia del teléfono
+// (0.2.2–0.2.6). Las puertas de búsqueda entregan un cascarón sin
+// vídeos ni páginas nombradas; y las páginas con sesión — portada,
+// watch, páginas guardadas, tres páginas reales de 360–530 mil letras
+// cada una — vienen SIN las llaves del GraphQL (dtsg:no · doc:0).
+// Esas llaves nacen de JavaScript, y el plugin no ejecuta JavaScript:
+// el mismo muro que TubeKino con sus PO tokens. La respuesta es la
+// misma de siempre: una cascada de planes que sí funcionan.
+//
+// LA MEMORIA DEL PLUGIN: todo vídeo que pasa por FaceTrack (parati,
+// páginas, enlaces, reels, «Ver más») queda recordado en el almacén
+// del plugin. La búsqueda por palabras ahora es LOCAL: filtra esa
+// memoria por título — sin acentos y sin distinguir mayúsculas. Se
+// llena sola con el uso: mientras más se usa el plugin, más encuentra
+// la búsqueda. Lo que sigue igual: enlaces pegados, páginas por nombre
+// EXACTO (sin espacios), parati, mis páginas, filas del Inicio. El
+// informe «debug» cuenta la memoria y explica la puerta cerrada (ya
+// no gasta 13 s repitiendo la prueba muerta).
+
 // FaceTrack 0.2.6 — las llaves donde sí hay sesión.
 //
 // La prueba del teléfono con la 0.2.5 (captura ~9:55) trajo dos
@@ -243,7 +265,7 @@
 // como "facebookexternalhit/1.1" (el rastreador de vistas previas del
 // propio Facebook), que no está limitado.
 
-const VERSION = "0.2.6";
+const VERSION = "0.3.0";
 
 // La cara con la que se piden las páginas (un Chrome de escritorio).
 const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -259,6 +281,126 @@ let trazaError = "";
 // Caché de los vídeos de cada página pedida (30 min): el Inicio y el
 // "Ver más" de una misma fila no gastan dos descargas iguales.
 var cachePag = {};
+
+// ---------- la memoria del plugin: búsqueda local ----------
+
+// Todo vídeo que pasa por FaceTrack (parati, páginas, enlaces, reels,
+// «Ver más») queda recordado aquí: {id, ref, ti, ot, po, rm, t}. La
+// búsqueda por palabras de Facebook está cerrada (sus resultados viven
+// detrás de GraphQL con llaves que nacen de JavaScript, y el plugin no
+// ejecuta JavaScript); la memoria es la búsqueda local: filtra por
+// título lo que ya se vio. Se llena sola con el uso.
+var memoriaLista = null;
+var memoriaSucia = false;
+
+// Texto normalizado para comparar: minúsculas, sin acentos, espacios
+// simples. Así «Anime Fandub Latino» encuentra «anime fandub latíno».
+function normTexto(t) {
+  let s = String(t || "").toLowerCase();
+  try { s = s.normalize("NFD").replace(/[\u0300-\u036f]/g, ""); } catch (e) { /* sin normalize */ }
+  return s.replace(/\s+/g, " ").trim();
+}
+
+// La memoria vive en el almacén del plugin (una sola clave, JSON).
+function cargarMemoria() {
+  if (memoriaLista) return memoriaLista;
+  memoriaLista = [];
+  try {
+    const bruto = String(kino.storage.get("fbMemoria") || "");
+    if (bruto) {
+      const arr = JSON.parse(bruto);
+      if (Array.isArray(arr)) memoriaLista = arr;
+    }
+  } catch (e) { memoriaLista = []; }
+  return memoriaLista;
+}
+
+// Guarda la memoria. Si el almacén se llena, se recorta a los 40 más
+// recientes y se reintenta una vez (lección de MangaTrack).
+function guardarMemoria() {
+  if (!memoriaSucia) return;
+  try {
+    kino.storage.set("fbMemoria", JSON.stringify(memoriaLista));
+  } catch (e) {
+    try {
+      memoriaLista = memoriaLista.slice(-40);
+      kino.storage.set("fbMemoria", JSON.stringify(memoriaLista));
+    } catch (e2) { /* sin espacio: la memoria vive solo este uso */ }
+  }
+  memoriaSucia = false;
+}
+
+// Recuerda un vídeo (dedupe por id, tope 120). La primera vez que se
+// ve queda su fecha; si vuelve a pasar, se refresca su ficha sin
+// cambiar la fecha. Si la memoria falla, el vídeo se entrega igual:
+// recordar nunca detiene nada.
+function recordarItem(it) {
+  if (!it || !it.id || String(it.ref || "").indexOf("v:") !== 0) return;
+  cargarMemoria();
+  const registro = {
+    id: String(it.id).slice(0, 60),
+    ref: String(it.ref).slice(0, 80),
+    ti: String(it.title || "").slice(0, 140),
+    ot: String(it.originalTitle || "").slice(0, 120),
+    po: String(it.poster || "").slice(0, 300),
+    rm: it.runtimeMinutes || 0,
+    t: Date.now()
+  };
+  let hallado = false;
+  for (let i = 0; i < memoriaLista.length; i++) {
+    const r = memoriaLista[i];
+    if (r && r.id === registro.id) {
+      if (r.ti !== registro.ti || r.ot !== registro.ot || r.po !== registro.po || r.rm !== registro.rm) {
+        memoriaLista[i] = { id: r.id, ref: registro.ref || r.ref, ti: registro.ti, ot: registro.ot, po: registro.po, rm: registro.rm, t: r.t || registro.t };
+        memoriaSucia = true;
+      }
+      hallado = true;
+      break;
+    }
+  }
+  if (!hallado) {
+    memoriaLista.push(registro);
+    memoriaSucia = true;
+  }
+  while (memoriaLista.length > 120) { memoriaLista.shift(); memoriaSucia = true; }
+  guardarMemoria();
+}
+
+// BÚSQUEDA LOCAL: filtra la memoria por título (normalizado). Primero
+// pide TODAS las palabras de la búsqueda; si ninguna ficha las trae
+// todas, conforma con las que tengan CUALQUIERA. Orden: lo visto más
+// recientemente primero.
+function memoriaBuscar(q, limite) {
+  cargarMemoria();
+  const palabras = normTexto(q).split(" ").filter(function (p) { return p.length > 1; });
+  if (palabras.length === 0 || memoriaLista.length === 0) return [];
+  const todas = [];
+  const algunas = [];
+  for (let i = 0; i < memoriaLista.length; i++) {
+    const r = memoriaLista[i];
+    if (!r || !r.ref) continue;
+    const texto = normTexto(r.ti) + " " + normTexto(r.ot);
+    let cuenta = 0;
+    for (let p = 0; p < palabras.length; p++) {
+      if (texto.indexOf(palabras[p]) >= 0) cuenta++;
+    }
+    if (cuenta === palabras.length) todas.push(r);
+    else if (cuenta > 0) algunas.push(r);
+  }
+  const elegidos = todas.length > 0 ? todas : algunas;
+  elegidos.sort(function (a, b) { return (b.t || 0) - (a.t || 0); });
+  const items = [];
+  for (let i = 0; i < elegidos.length && items.length < limite; i++) {
+    const r = elegidos[i];
+    const it = { id: r.id, ref: r.ref, title: r.ti || "Video de Facebook", kind: "movie" };
+    if (r.po) it.poster = r.po;
+    if (r.ot) it.originalTitle = r.ot;
+    it.overview = "Visto antes en FaceTrack · búsqueda local (memoria: " + memoriaLista.length + " vídeo(s))";
+    if (r.rm) it.runtimeMinutes = r.rm;
+    items.push(it);
+  }
+  return items;
+}
 
 // ---------- sesión: la ventanita de Kino (visualBrowser) ----------
 
@@ -754,6 +896,10 @@ function itemDeVideo(v, nombrePagina, posterRespaldo) {
   if (typeof v.creation_time === "number" && v.creation_time > 0) {
     item.year = new Date(v.creation_time * 1000).getUTCFullYear();
   }
+  // LA MEMORIA DEL PLUGIN: todo vídeo que pasa por aquí queda
+  // recordado para la búsqueda local. Si la memoria falla, el vídeo
+  // se entrega igual: recordar nunca detiene nada.
+  try { recordarItem(item); } catch (e) { /* memoria rota: no detiene nada */ }
   return item;
 }
 
@@ -1309,8 +1455,7 @@ export async function search(query) {
   }
 
 
-  // La última búsqueda queda guardada: el informe "debug" la repite EN
-  // VIVO con sus puertas, aunque la app se haya reiniciado entre medio.
+  // La última búsqueda queda guardada para el informe "debug".
   try { kino.storage.set("fbQ", q); } catch (e) { /* sin almacén */ }
 
   // ¿Nombre de una página? (los nombres de Facebook no llevan espacios)
@@ -1318,27 +1463,26 @@ export async function search(query) {
     trazaBusqueda = "página: " + q;
     const items = await itemsDePagina(q, 30, "");
     if (items.length > 0) return items;
-    // Con sesión, un nombre raro puede ser una búsqueda y no una página.
-    if (sesionActiva()) {
-      const reales = await itemsDeBusquedaReal(q, 30);
-      if (reales.length > 0) return reales;
-    }
+    // La página no trajo vídeos: queda la búsqueda LOCAL en la
+    // memoria (la puerta de palabras de Facebook está cerrada).
+    const locales = memoriaBuscar(q, 30);
+    if (locales.length > 0) return locales;
     throw kino.error("not_found", "página sin vídeos: " + q, {
       userMessage: "No encontré vídeos públicos de esa página (o no existe). El nombre es lo que va tras facebook.com/, sin espacios."
     });
   }
 
-  // Búsqueda general: con sesión responde de verdad; sin ella, aviso.
-  if (sesionActiva()) {
-    const reales = await itemsDeBusquedaReal(q, 30);
-    if (reales.length > 0) return reales;
-    throw kino.error("not_found", "sin resultados: " + q.slice(0, 60), {
-      userMessage: "La búsqueda no trajo vídeos. Escribe debug para el informe."
-    });
-  }
-  trazaBusqueda = "búsqueda general (pide sesión): rechazada";
-  throw kino.error("not_found", "búsqueda no compatible: " + q.slice(0, 60), {
-    userMessage: "La búsqueda general de Facebook pide iniciar sesión: toca Iniciar sesión en Facebook en Ajustes del plugin. O pega un enlace de vídeo o escribe el nombre EXACTO de una página (sin espacios)."
+  // BÚSQUEDA LOCAL: la búsqueda por palabras de Facebook quedó cerrada
+  // con evidencia (0.2.2–0.2.6): sus resultados solo viven detrás de
+  // GraphQL con llaves que nacen de JavaScript, y el plugin no ejecuta
+  // JavaScript. Lo que sí se puede: buscar ENTRE LO YA VISTO — la
+  // memoria del plugin (parati, páginas, enlaces, reels).
+  trazaBusqueda = "búsqueda local (memoria): «" + q.slice(0, 30) + "»";
+  const locales = memoriaBuscar(q, 30);
+  if (locales.length > 0) return locales;
+  const nMemoria = cargarMemoria().length;
+  throw kino.error("not_found", "sin resultados locales: " + q.slice(0, 60), {
+    userMessage: "La búsqueda por palabras de Facebook quedó cerrada (sus resultados viven detrás de una puerta que el plugin no puede abrir). Esto sí funciona: pega un enlace, escribe el nombre EXACTO de una página (sin espacios) o parati. Esta búsqueda también mira en lo ya visto con el plugin: hay " + nMemoria + " vídeo(s) en la memoria, y se llena sola a medida que usas parati, tus páginas y enlaces."
   });
 }
 
@@ -1575,8 +1719,8 @@ export async function resolve(ref, options) {
 export async function settingsStatus() {
   const n = paginasGuardadas().length;
   const texto = sesionActiva()
-    ? "Sesión activa: Para ti y búsqueda real disponibles. "
-    : "Sin sesión: enlaces y páginas públicas (inicia sesión en Ajustes). ";
+    ? "Sesión activa: Para ti, páginas completas y búsqueda local. "
+    : "Sin sesión: enlaces, páginas públicas y búsqueda local (inicia sesión en Ajustes). ";
   return {
     estado: ("FaceTrack " + VERSION + ". " + texto + n + " página(s) guardadas.").slice(0, 200)
   };
@@ -1641,42 +1785,19 @@ async function informarEnVivo(url) {
   return paso;
 }
 
-// La última búsqueda, repetida EN VIVO con dos puertas: aunque la app
-// se reinicie (las trazas de arriba viven solo en memoria), esta línea
-// del informe siempre sabe qué le respondió Facebook a la búsqueda.
+// La línea del informe que cuenta la verdad de la búsqueda: quedó
+// CERRADA con evidencia del teléfono (0.2.2–0.2.6) — cascarones sin
+// vídeos en todas las puertas de búsqueda, y ni token ni consulta en
+// portada, watch ni páginas con sesión. Las llaves de GraphQL nacen
+// de JavaScript, que el plugin no ejecuta: repetir la prueba muerta
+// solo gastaba 13 s del informe. En su lugar: la MEMORIA (búsqueda
+// local) y la explicación.
 async function informarBusquedaViva() {
-  let q = "";
-  try { q = String(kino.storage.get("fbQ") || ""); } catch (e) { q = ""; }
-  if (!q) return "BÚSQUEDA EN VIVO: sin búsqueda previa";
-  const t0 = Date.now();
-  const partes = [];
-  const ab = await abrirFacebook("https://www.facebook.com/search/top?q=" + encodeURIComponent(q), 1200000, 5000, false, true);
-  if (!ab.r) return ("BÚSQUEDA EN VIVO «" + q.slice(0, 30) + "» ‖ www ✗ " + ab.traza.join(",")).slice(0, 440);
-  const html = ab.r.text();
-  const plano = html.split('\\"').join('"');
-  let tokens = tokensDe(plano);
-  const vistos = {};
-  const rxU = /"username":"([A-Za-z0-9.\-_]{2,60})"/g;
-  let mu;
-  while ((mu = rxU.exec(plano)) !== null) { if (!vistos[mu[1]]) vistos[mu[1]] = true; }
-  partes.push("www " + ab.traza.join("→") + " · " + html.length + " car · json:" +
-    (html.match(/data-sjs/g) || []).length + " · muro:" + (pintaMuro(html) ? "SÍ" : "no") +
-    " · vídeos:" + videosDeHtml(html).length +
-    " · V:" + Math.max((html.match(/"__typename":"Video"/g) || []).length,
-      (plano.match(/"__typename":"Video"/g) || []).length) +
-    " · págs:" + Object.keys(vistos).length +
-    " · dtsg:" + (tokens.dtsg ? "sí" : "no") + " · lsd:" + (tokens.lsd ? "sí" : "no") +
-    " · doc:" + tokens.docs.length);
-  // Si el cascarón quedó mudo, se buscan las llaves donde sí hay
-  // sesión de verdad (portada, watch, primera página guardada).
-  if (!tokens.dtsg || tokens.docs.length === 0) {
-    tokens = await completarLlaves(tokens, partes, t0 + 8000);
-  }
-  if (tokens.dtsg && tokens.docs.length > 0) {
-    const gr = await pedirGraphQL(q, tokens.docs[0], tokens.dtsg, tokens.lsd, "videos");
-    partes.push(gr.parte);
-  }
-  return ("BÚSQUEDA EN VIVO «" + q.slice(0, 30) + "» ‖ " + partes.join(" ‖ ")).slice(0, 440);
+  const n = cargarMemoria().length;
+  return ("BÚSQUEDA: cerrada con evidencia (0.2.2–0.2.6) — los resultados de Facebook viven " +
+    "detrás de GraphQL con llaves que nacen de JavaScript, que el plugin no ejecuta. " +
+    "En su lugar, búsqueda LOCAL en la memoria: " + n + " vídeo(s) recordados (se llena " +
+    "con parati, tus páginas y enlaces).").slice(0, 440);
 }
 
 async function informeDebug() {
@@ -1696,7 +1817,8 @@ async function informeDebug() {
     "Último Inicio: " + (trazaHome || "—"),
     "Última reproducción: " + (trazaResolve || "—"),
     "Último fallo: " + (trazaError || "—"),
-    "Caché de páginas: " + Object.keys(cachePag).length
+    "Caché de páginas: " + Object.keys(cachePag).length,
+    "Memoria: " + cargarMemoria().length + " vídeo(s) para la búsqueda local"
   ];
   return [{
     id: "fbv.debug",

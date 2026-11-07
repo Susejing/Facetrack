@@ -14,6 +14,23 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+// FaceTrack 0.2.2 — el interrogatorio del buscador.
+//
+// Primera prueba del teléfono con la sesión puesta (7 nov): la 0.2.1
+// instaló bien (la lista «Tus páginas», la ventanita funcionó, sesión
+// activa) pero la búsqueda real trajo 0 vídeos (con «anime»). El banco
+// de pruebas no puede reproducirlo (Facebook bloquea la IP del
+// servidor), así que esta versión INTERROGA: la búsqueda prueba hasta
+// cuatro puertas (la general y la de vídeos, en www y en m.) y abre la
+// primera con la cara de NAVEGADOR aunque la escalera tenga otra
+// recordada — con las galletas puestas, esa cara es la que Facebook
+// toma en serio para contestar. Y el informe «debug» trae la línea
+// nueva «BÚSQUEDA EN VIVO»: qué cara abrió cada puerta, cuántas letras
+// y bloques JSON trajo, si había muro, señal de MP4 y cuántos vídeos
+// salieron. Con esa captura se sabe si Facebook entrega el esqueleto
+// vacío (habría que ir a la puerta interna GraphQL) o un muro, y la
+// 0.2.3 sale certera en vez de a ciegas.
+
 // FaceTrack 0.2.1 — la lista de páginas.
 //
 // Qué pasó con la 0.2.0: le sumó tres ajustes de cookies a los 12 que
@@ -162,7 +179,7 @@
 // como "facebookexternalhit/1.1" (el rastreador de vistas previas del
 // propio Facebook), que no está limitado.
 
-const VERSION = "0.2.1";
+const VERSION = "0.2.2";
 
 // La cara con la que se piden las páginas (un Chrome de escritorio).
 const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -908,21 +925,36 @@ async function itemsDeParaTi(limite) {
 
 // ---------- búsqueda real y páginas seguidas (con sesión) ----------
 
-// Con sesión, la búsqueda de Facebook responde de verdad: la pestaña
-// general y la de vídeos, la que traiga primero.
+// Con sesión, la búsqueda de Facebook... EL INTERROGATORIO: hasta
+// cuatro puertas (la general y la de vídeos, en www y en m.), y la
+// primera se abre con la cara de NAVEGADOR aunque la escalera tenga
+// otra recordada (con las galletas puestas, esa cara es la que Facebook
+// toma en serio para buscar). Cada puerta deja su parte en la traza —
+// cara, letras, bloques JSON, muro, señal de MP4, vídeos — para que el
+// informe "debug" cuente qué le respondió Facebook.
 async function itemsDeBusquedaReal(q, limite) {
   let nodos = [];
-  const urls = [
-    "https://www.facebook.com/search/top?q=" + encodeURIComponent(q),
-    "https://www.facebook.com/search/videos/?q=" + encodeURIComponent(q)
+  const puertas = [
+    { nombre: "www.general", url: "https://www.facebook.com/search/top?q=" + encodeURIComponent(q) },
+    { nombre: "www.vídeos", url: "https://www.facebook.com/search/videos/?q=" + encodeURIComponent(q) },
+    { nombre: "m.general", url: "https://m.facebook.com/search/top?q=" + encodeURIComponent(q) },
+    { nombre: "m.vídeos", url: "https://m.facebook.com/search/videos/?q=" + encodeURIComponent(q) }
   ];
   const inicio = Date.now();
-  for (let i = 0; i < urls.length && nodos.length === 0; i++) {
-    if (i > 0 && Date.now() - inicio > 7000) break;
-    const ab = await abrirFacebook(urls[i], 1200000, 8000, false);
-    if (ab.r) nodos = videosDeHtml(ab.r.text());
+  const partes = [];
+  for (let i = 0; i < puertas.length && nodos.length === 0; i++) {
+    if (i > 0 && Date.now() - inicio > 8000) break;
+    const ab = await abrirFacebook(puertas[i].url, 1200000, 5000, false, i === 0);
+    if (!ab.r) { partes.push(puertas[i].nombre + " ✗ " + ab.traza.join(",")); continue; }
+    const html = ab.r.text();
+    const n = videosDeHtml(html);
+    partes.push(puertas[i].nombre + " " + ab.traza.join("→") + " · " + html.length + " car · json:" +
+      (html.match(/data-sjs/g) || []).length + " · muro:" + (pintaMuro(html) ? "SÍ" : "no") +
+      " · MP4:" + (marcaVideo(html) ? "sí" : "no") + " · vídeos:" + n.length);
+    if (n.length > 0) nodos = n;
   }
-  trazaBusqueda = "búsqueda real: " + nodos.length + " vídeo(s) de «" + q.slice(0, 40) + "»";
+  trazaBusqueda = ((trazaBusqueda && trazaBusqueda.indexOf("página: ") === 0 ? trazaBusqueda + " ‖ " : "") +
+    "búsqueda real «" + q.slice(0, 30) + "» ‖ " + partes.join(" ‖ ")).slice(0, 460);
   const items = [];
   for (let i = 0; i < nodos.length && items.length < limite; i++) {
     const it = itemDeVideo(nodos[i], "", "");
@@ -999,6 +1031,10 @@ export async function search(query) {
     });
   }
 
+
+  // La última búsqueda queda guardada: el informe "debug" la repite EN
+  // VIVO con sus puertas, aunque la app se haya reiniciado entre medio.
+  try { kino.storage.set("fbQ", q); } catch (e) { /* sin almacén */ }
 
   // ¿Nombre de una página? (los nombres de Facebook no llevan espacios)
   if (/^[A-Za-z0-9.\-_]{2,60}$/.test(q)) {
@@ -1328,14 +1364,39 @@ async function informarEnVivo(url) {
   return paso;
 }
 
+// La última búsqueda, repetida EN VIVO con dos puertas: aunque la app
+// se reinicie (las trazas de arriba viven solo en memoria), esta línea
+// del informe siempre sabe qué le respondió Facebook a la búsqueda.
+async function informarBusquedaViva() {
+  let q = "";
+  try { q = String(kino.storage.get("fbQ") || ""); } catch (e) { q = ""; }
+  if (!q) return "BÚSQUEDA EN VIVO: sin búsqueda previa";
+  const puertas = [
+    ["www.general", "https://www.facebook.com/search/top?q=" + encodeURIComponent(q)],
+    ["www.vídeos", "https://www.facebook.com/search/videos/?q=" + encodeURIComponent(q)]
+  ];
+  const partes = [];
+  for (let i = 0; i < puertas.length; i++) {
+    const ab = await abrirFacebook(puertas[i][1], 1200000, 6000, false, true);
+    if (!ab.r) { partes.push(puertas[i][0] + " ✗ " + ab.traza.join(",")); continue; }
+    const html = ab.r.text();
+    partes.push(puertas[i][0] + " " + ab.traza.join("→") + " · " + html.length + " car · json:" +
+      (html.match(/data-sjs/g) || []).length + " · muro:" + (pintaMuro(html) ? "SÍ" : "no") +
+      " · MP4:" + (marcaVideo(html) ? "sí" : "no") + " · vídeos:" + videosDeHtml(html).length);
+  }
+  return ("BÚSQUEDA EN VIVO «" + q.slice(0, 30) + "» ‖ " + partes.join(" ‖ ")).slice(0, 300);
+}
+
 async function informeDebug() {
   const pags = paginasGuardadas();
   let ultimo = "";
   try { ultimo = String(kino.storage.get("fbUltimo") || ""); } catch (e) { /* sin almacén */ }
   const vivo = await informarEnVivo(ultimo);
+  const vivoBusca = await informarBusquedaViva();
   // La prueba en vivo va PRIMERO: es lo que dice la verdad del teléfono.
   const lineas = [
     vivo,
+    vivoBusca,
     "FaceTrack " + VERSION + " — informe",
     "Sesión: " + (sesionActiva() ? "activa (c_user/xs)" : (galletasSesion() ? "galletas sin c_user/xs" : "sin sesión")) + " · ventanita: " + (hayVentanita() ? "sí" : "no"),
     "Páginas guardadas: " + pags.length + (pags.length ? " (" + pags.map(function (p) { return p.slug; }).join(", ") + ")" : ""),
@@ -1350,7 +1411,7 @@ async function informeDebug() {
     ref: "debug",
     title: "FaceTrack — informe técnico",
     kind: "movie",
-    overview: lineas.join(" · ").slice(0, 480)
+    overview: lineas.join(" · ").slice(0, 900)
   }];
 }
 

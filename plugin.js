@@ -14,6 +14,26 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+// FaceTrack 0.4.1 — Descubre en paralelo y a prueba de instancias.
+//
+// La primera prueba del catálogo (16:44) contó la verdad: la 0.4.0
+// instaló bien y el buscador sí intentó «videojuegos» como página,
+// pero en el Inicio solo salió el riel de siempre — ni una fila
+// Descubre. Dos culpas del diseño, no de Facebook: las 6 páginas se
+// pedían UNA POR UNA detrás del riel Para ti (la suma de latencias
+// se comía el presupuesto de 13 s y el catálogo nacía vacío — la
+// misma lección que Loop aprendió: las filas de una portada se
+// piden en paralelo), y la caché vivía solo en la MEMORIA de la
+// instancia, que Kino renueva al pasar por el reproductor (por eso
+// el informe decía «Último Inicio: —» justo cuando hacía falta).
+// Esta versión: las 6 páginas Descubre se piden EN PARALELO (tope
+// de 9 s por página, la que no contesta se omite sin esperarla),
+// las filas que llegan quedan GUARDADAS en el almacén del teléfono
+// (3 h: la próxima visita nace llena aunque una página tarde o no
+// conteste — con o sin sesión), y las trazas del Inicio y del riel
+// también se guardan en el almacén: el informe ya no pierde la
+// verdad del catálogo al reproducir un vídeo.
+
 // FaceTrack 0.4.0 — el catálogo de verdad.
 //
 // La queja del usuario fue justa: el plugin era un laboratorio (había
@@ -334,7 +354,7 @@
 // como "facebookexternalhit/1.1" (el rastreador de vistas previas del
 // propio Facebook), que no está limitado.
 
-const VERSION = "0.4.0";
+const VERSION = "0.4.1";
 
 // La cara con la que se piden las páginas (un Chrome de escritorio).
 const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -369,6 +389,73 @@ const DESCUBRE = [
   { pag: "AnimAMV168", fila: "AMV" },
   { pag: "meristation", fila: "Videojuegos" }
 ];
+
+// ---------- el catálogo Descubre que sobrevive ----------
+
+// Las filas Descubre que ya trajeron vídeos quedan GUARDADAS en el
+// almacén del teléfono (3 h): la próxima visita nace llena aunque una
+// página tarde o no conteste — la caché en memoria moría con la
+// instancia del plugin (Kino la renueva al pasar por el reproductor)
+// y el catálogo se vaciaba con ella.
+function guardarDescubre(filasDatos) {
+  const ligeras = [];
+  for (let i = 0; i < filasDatos.length; i++) {
+    ligeras.push({ slug: filasDatos[i].slug, fila: filasDatos[i].titulo, items: filasDatos[i].items.slice(0, 12) });
+  }
+  const datos = JSON.stringify({ t: Date.now(), filas: ligeras });
+  try { kino.storage.set("fbDescubre", datos); return; } catch (e) { /* se recorta */ }
+  try {
+    const pocas = [];
+    for (let i = 0; i < ligeras.length && i < 3; i++) {
+      pocas.push({ slug: ligeras[i].slug, fila: ligeras[i].fila, items: ligeras[i].items.slice(0, 8) });
+    }
+    kino.storage.set("fbDescubre", JSON.stringify({ t: Date.now(), filas: pocas }));
+  } catch (e2) { /* sin espacio: el catálogo vive solo esta visita */ }
+}
+
+// Las filas Descubre guardadas (null si no hay o si pasaron las 3 h;
+// con toleraViejo sirve de respaldo aunque ya estén frías).
+function descubreGuardado(toleraViejo) {
+  try {
+    const bruto = String(kino.storage.get("fbDescubre") || "");
+    if (!bruto) return null;
+    const datos = JSON.parse(bruto);
+    if (!datos || !Array.isArray(datos.filas) || datos.filas.length === 0) return null;
+    if (!toleraViejo && Date.now() - (datos.t || 0) > 10800000) return null;
+    return datos;
+  } catch (e) { return null; }
+}
+
+// Las filas guardadas convertidas en filas de Kino.
+function filasDeGuardado(datos) {
+  const filas = [];
+  for (let i = 0; i < datos.filas.length; i++) {
+    const f = datos.filas[i] || {};
+    const items = Array.isArray(f.items) ? f.items : [];
+    if (!f.slug || items.length === 0) continue;
+    filas.push({
+      id: "fila.desc." + String(f.slug).replace(/[^A-Za-z0-9._~-]/g, "-"),
+      title: String(f.fila || f.slug),
+      items: items,
+      ref: "pg:" + f.slug,
+      genre: "otros"
+    });
+  }
+  return filas;
+}
+
+// Una promesa con tope de tiempo: si la página no contesta a tiempo, la
+// fila se omite sin esperarla (las 6 van en paralelo, ninguna bloquea).
+function conTope(promesa, ms) {
+  return new Promise(function (resolver) {
+    let listo = false;
+    setTimeout(function () { if (!listo) { listo = true; resolver([]); } }, ms);
+    Promise.resolve(promesa).then(
+      function (v) { if (!listo) { listo = true; resolver(v); } },
+      function () { if (!listo) { listo = true; resolver([]); } }
+    );
+  });
+}
 
 // ---------- la memoria del plugin: búsqueda local ----------
 
@@ -1249,6 +1336,7 @@ async function videosParaTi() {
     }
   }
   trazaParati = paso.join(" ").slice(0, 260);
+  try { kino.storage.set("fbTrazaParati", trazaParati); } catch (e) { /* sin almacén */ }
   cachePag["*parati"] = { nodos: nodos, t: Date.now() };
   return nodos;
 }
@@ -1651,6 +1739,27 @@ export async function home() {
   const filas = [];
   let ok = 0;
   let paraTi = false;
+  // EL CATÁLOGO «DESCUBRE» EN PARALELO (lección de Loop: las filas de
+  // una portada nunca se suman en fila india — seis páginas seguidas
+  // detrás del riel se comían el presupuesto y el catálogo nacía
+  // vacío, como contó la primera prueba). Si el almacén ya tiene
+  // filas frescas (3 h), se usan esas y la portada nace llena.
+  const guardado = descubreGuardado(false);
+  const promesasDesc = [];
+  if (!guardado) {
+    const yaGuardada = {};
+    for (let i = 0; i < pags.length; i++) yaGuardada[String(pags[i].slug).toLowerCase()] = true;
+    const yaPedida = {};
+    for (let d = 0; d < DESCUBRE.length; d++) {
+      const slug = slugDe(DESCUBRE[d].pag);
+      if (!slug || yaGuardada[slug.toLowerCase()] || yaPedida[slug.toLowerCase()]) continue;
+      yaPedida[slug.toLowerCase()] = true;
+      const titulo = DESCUBRE[d].fila || slug;
+      promesasDesc.push(conTope(itemsDePagina(slug, 14, titulo), 9000).then(function (items) {
+        return { slug: slug, titulo: titulo, items: items };
+      }));
+    }
+  }
   // Con sesión, el riel del algoritmo encabeza la portada.
   if (conSesion) {
     try {
@@ -1687,33 +1796,47 @@ export async function home() {
   }
   // EL CATÁLOGO «DESCUBRE»: filas de páginas que publican vídeos cada
   // día, elegidas por tema — se suman después de las páginas tuyas.
-  // Las que no traen vídeos hoy no salen (nada de filas vacías) y la
-  // caché de 30 min va llenando la portada con cada visita.
-  let okDescubre = 0;
-  const yaGuardada = {};
-  for (let i = 0; i < pags.length; i++) yaGuardada[String(pags[i].slug).toLowerCase()] = true;
-  for (let d = 0; d < DESCUBRE.length; d++) {
-    if (Date.now() - inicio > 13000) break;
-    const slug = slugDe(DESCUBRE[d].pag);
-    if (!slug || yaGuardada[slug.toLowerCase()]) continue;
-    try {
-      const items = await itemsDePagina(slug, 14, DESCUBRE[d].fila);
-      if (items.length > 0) {
-        okDescubre = okDescubre + 1;
-        filas.push({
-          id: "fila.desc." + slug.replace(/[^A-Za-z0-9._~-]/g, "-"),
-          title: DESCUBRE[d].fila || slug,
-          items: items,
-          ref: "pg:" + slug,
+  // Con el almacén fresco salen directo; si no, se recogen las que
+  // contestaron de las 6 pedidas EN PARALELO (las que no traen vídeos
+  // hoy no salen: nada de filas vacías) y se guardan para que la
+  // próxima visita nazca llena.
+  let filasDesc = guardado ? filasDeGuardado(guardado) : [];
+  let deCache = !!guardado;
+  if (promesasDesc.length > 0) {
+    const resultados = await Promise.all(promesasDesc);
+    const datos = [];
+    for (let i = 0; i < resultados.length; i++) {
+      const r = resultados[i] || {};
+      if (r.items && r.items.length > 0) datos.push({ slug: r.slug, titulo: r.titulo, items: r.items });
+    }
+    if (datos.length > 0) {
+      guardarDescubre(datos);
+      filasDesc = [];
+      deCache = false;
+      for (let i = 0; i < datos.length; i++) {
+        filasDesc.push({
+          id: "fila.desc." + datos[i].slug.replace(/[^A-Za-z0-9._~-]/g, "-"),
+          title: datos[i].titulo,
+          items: datos[i].items,
+          ref: "pg:" + datos[i].slug,
           genre: "otros"
         });
       }
-    } catch (e) { /* fila omitida, las demás siguen */ }
+    } else {
+      // Ninguna contestó: mejor las de hace rato que un catálogo vacío.
+      const viejo = descubreGuardado(true);
+      if (viejo) { filasDesc = filasDeGuardado(viejo); deCache = true; }
+    }
   }
+  for (let i = 0; i < filasDesc.length; i++) filas.push(filasDesc[i]);
   trazaHome = "portada: " + ok + "/" + pags.length + " páginas con vídeos" +
-    (trazaPaginas ? " (" + trazaPaginas + ")" : "") + " · Descubre: " + okDescubre +
-    "/" + DESCUBRE.length + " fila(s)" + " · Para ti: " +
+    (trazaPaginas ? " (" + trazaPaginas + ")" : "") + " · Descubre: " + filasDesc.length +
+    "/" + DESCUBRE.length + " fila(s)" + (deCache ? " (del almacén)" : "") + " · Para ti: " +
     (paraTi ? "sí" : (conSesion ? "vacío" : "sin sesión"));
+  // La traza del Inicio se guarda en el almacén: las trazas en memoria
+  // mueren cuando Kino renueva la instancia (al reproducir) y el
+  // informe perdía la verdad del catálogo justo cuando hacía falta.
+  try { kino.storage.set("fbTrazaHome", trazaHome); } catch (e) { /* sin almacén */ }
   if (filas.length === 0) {
     throw kino.error("unavailable", "home sin filas", {
       userMessage: "Ni el riel Para ti, ni tus páginas, ni las filas Descubre trajeron vídeos ahora mismo. Escribe debug para el informe."
@@ -1982,6 +2105,13 @@ async function informeDebug() {
   const pags = paginasGuardadas();
   let ultimo = "";
   try { ultimo = String(kino.storage.get("fbUltimo") || ""); } catch (e) { /* sin almacén */ }
+  // Las trazas del Inicio y del riel también se leen del ALMACÉN: en
+  // memoria mueren cuando Kino renueva la instancia (al reproducir), y
+  // el informe perdía la verdad del catálogo justo cuando hacía falta.
+  let trazaHomeGuardada = "";
+  let trazaParatiGuardada = "";
+  try { trazaHomeGuardada = String(kino.storage.get("fbTrazaHome") || ""); } catch (e) { /* sin almacén */ }
+  try { trazaParatiGuardada = String(kino.storage.get("fbTrazaParati") || ""); } catch (e) { /* sin almacén */ }
   // PRIMERO las líneas que deciden el diagnóstico (sesión, búsquedas,
   // fallo, memoria): el tope de 900 caracteres corta lo ÚLTIMO, y si la
   // prueba en vivo (larga) va primero, se come la verdad — lección de
@@ -1991,8 +2121,8 @@ async function informeDebug() {
     "Sesión: " + (sesionActiva() ? "activa (c_user/xs)" : (galletasSesion() ? "galletas sin c_user/xs" : "sin sesión")) + " · ventanita: " + (hayVentanita() ? "sí" : "no"),
     "Páginas guardadas: " + pags.length + (pags.length ? " (" + pags.map(function (p) { return p.slug; }).join(", ") + ")" : ""),
     "Última búsqueda: " + (trazaBusqueda || "—"),
-    "Último Inicio: " + (trazaHome || "—"),
-    "Riel Para ti: " + (trazaParati || "—"),
+    "Último Inicio: " + (trazaHome || trazaHomeGuardada || "—"),
+    "Riel Para ti: " + (trazaParati || trazaParatiGuardada || "—"),
     "Última reproducción: " + (trazaResolve || "—"),
     "Último fallo: " + (trazaError || "—"),
     "Caché de páginas: " + Object.keys(cachePag).length,

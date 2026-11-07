@@ -14,6 +14,28 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+// FaceTrack 0.4.0 — el catálogo de verdad.
+//
+// La queja del usuario fue justa: el plugin era un laboratorio (había
+// que adivinar palabras para que la búsqueda local encontrara algo) y
+// no un catálogo. La búsqueda por palabras de Facebook sigue CERRADA
+// con evidencia (0.2.2–0.2.6: sus resultados viven detrás de GraphQL
+// con llaves que nacen de JavaScript, y el plugin no ejecuta
+// JavaScript) — pero la experiencia sí se puede parecer a la de
+// Facebook, y esta versión lo hace con dos puertas:
+// (1) EL CATÁLOGO «DESCUBRE»: filas fijas de páginas que publican
+// vídeos cada día, elegidas por tema (anime, doramas, películas,
+// música, AMV y videojuegos — las pidió el usuario). Se suman al
+// Inicio después del riel «Para ti» y de las páginas tuyas. Las que
+// no traen vídeos hoy no salen (nada de filas vacías) y la caché de
+// 30 min va llenando la portada con cada visita; la línea «Descubre»
+// del informe dice cuántas filas trajeron. El teléfono es el juez:
+// la que nunca traiga se cambia en la lista DESCUBRE del código.
+// (2) LA PUERTA DE PÁGINAS EN EL BUSCADOR: cualquier texto se intenta
+// también como nombre de página (los nombres de Facebook no llevan
+// espacios): «videojuegos» trae los vídeos de esa página aunque la
+// memoria no tenga nada. La búsqueda por palabras queda de respaldo.
+
 // FaceTrack 0.3.3 — watch primero.
 //
 // La captura del teléfono con la 0.3.2 (16:04) trajo por fin la caza
@@ -312,7 +334,7 @@
 // como "facebookexternalhit/1.1" (el rastreador de vistas previas del
 // propio Facebook), que no está limitado.
 
-const VERSION = "0.3.3";
+const VERSION = "0.4.0";
 
 // La cara con la que se piden las páginas (un Chrome de escritorio).
 const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -330,6 +352,23 @@ let trazaParati = "";
 // Caché de los vídeos de cada página pedida (30 min): el Inicio y el
 // "Ver más" de una misma fila no gastan dos descargas iguales.
 var cachePag = {};
+
+// ---------- «Descubre»: el catálogo de filas por tema ----------
+// La experiencia de catálogo: filas fijas de páginas que publican
+// vídeos cada día, elegidas por tema (las pidió el usuario: anime,
+// doramas, películas, música, AMV y videojuegos). Los nombres son los
+// que van tras facebook.com/. El teléfono es el juez: las que no
+// traigan vídeos hoy no salen en la portada, y si alguna nunca trae,
+// se cambia aquí abajo. No gastan ajustes: cada fila usa la caché de
+// páginas de 30 min igual que las páginas tuyas.
+const DESCUBRE = [
+  { pag: "clipsAnimeLatino", fila: "Anime" },
+  { pag: "DoramasCoreanosViki", fila: "Doramas" },
+  { pag: "ViendoMovies", fila: "Películas" },
+  { pag: "Videomusic.i", fila: "Música" },
+  { pag: "AnimAMV168", fila: "AMV" },
+  { pag: "meristation", fila: "Videojuegos" }
+];
 
 // ---------- la memoria del plugin: búsqueda local ----------
 
@@ -1584,9 +1623,20 @@ export async function search(query) {
   trazaBusqueda = "búsqueda local (memoria): «" + q.slice(0, 30) + "»";
   const locales = memoriaBuscar(q, 30);
   if (locales.length > 0) return locales;
+  // LA PUERTA DE PÁGINAS: cualquier texto también puede ser el nombre
+  // de una página (los nombres de Facebook no llevan espacios) —
+  // «viajes extremos» → viajesextremos. Si la memoria no tenía nada,
+  // se intenta la página antes de rendirse: es lo más cerca de
+  // «buscar lo que quiera» que la puerta cerrada permite.
+  const slugTexto = slugDe(q.replace(/ /g, ""));
+  if (slugTexto) {
+    trazaBusqueda = "página (por nombre): " + slugTexto + " ‖ " + trazaBusqueda;
+    const items = await itemsDePagina(slugTexto, 30, "");
+    if (items.length > 0) return items;
+  }
   const nMemoria = cargarMemoria().length;
   throw kino.error("not_found", "sin resultados locales: " + q.slice(0, 60), {
-    userMessage: "La búsqueda por palabras de Facebook quedó cerrada (sus resultados viven detrás de una puerta que el plugin no puede abrir). Esto sí funciona: pega un enlace, escribe el nombre EXACTO de una página (sin espacios) o parati. Esta búsqueda también mira en lo ya visto con el plugin: hay " + nMemoria + " vídeo(s) en la memoria, y se llena sola a medida que usas parati, tus páginas y enlaces."
+    userMessage: "La búsqueda por palabras de Facebook quedó cerrada (sus resultados viven detrás de una puerta que el plugin no abre). Esto sí funciona: escribir el nombre de una página SIN espacios (ej: videojuegos) trae sus vídeos; también pega enlaces o escribe parati. Miré además lo ya visto en el plugin: hay " + nMemoria + " vídeo(s) en la memoria, y se llena sola mientras usas parati, tus páginas y enlaces."
   });
 }
 
@@ -1595,12 +1645,8 @@ export async function search(query) {
 export async function home() {
   const pags = paginasGuardadas();
   const conSesion = sesionActiva();
-  // Sin páginas ni sesión no hay error: Kino muestra su aviso propio de
-  // "sin catálogos" y en Ajustes está la guía de cómo empezar.
-  if (pags.length === 0 && !conSesion) {
-    trazaHome = "portada: sin páginas guardadas (agrega páginas en la lista de Ajustes)";
-    return [];
-  }
+  // Sin páginas guardadas ya no se devuelve vacío: el catálogo
+  // «Descubre» puede llenar la portada él solo, con o sin sesión.
   const inicio = Date.now();
   const filas = [];
   let ok = 0;
@@ -1639,12 +1685,38 @@ export async function home() {
       }
     } catch (e) { /* fila omitida, las demás siguen */ }
   }
+  // EL CATÁLOGO «DESCUBRE»: filas de páginas que publican vídeos cada
+  // día, elegidas por tema — se suman después de las páginas tuyas.
+  // Las que no traen vídeos hoy no salen (nada de filas vacías) y la
+  // caché de 30 min va llenando la portada con cada visita.
+  let okDescubre = 0;
+  const yaGuardada = {};
+  for (let i = 0; i < pags.length; i++) yaGuardada[String(pags[i].slug).toLowerCase()] = true;
+  for (let d = 0; d < DESCUBRE.length; d++) {
+    if (Date.now() - inicio > 13000) break;
+    const slug = slugDe(DESCUBRE[d].pag);
+    if (!slug || yaGuardada[slug.toLowerCase()]) continue;
+    try {
+      const items = await itemsDePagina(slug, 14, DESCUBRE[d].fila);
+      if (items.length > 0) {
+        okDescubre = okDescubre + 1;
+        filas.push({
+          id: "fila.desc." + slug.replace(/[^A-Za-z0-9._~-]/g, "-"),
+          title: DESCUBRE[d].fila || slug,
+          items: items,
+          ref: "pg:" + slug,
+          genre: "otros"
+        });
+      }
+    } catch (e) { /* fila omitida, las demás siguen */ }
+  }
   trazaHome = "portada: " + ok + "/" + pags.length + " páginas con vídeos" +
-    (trazaPaginas ? " (" + trazaPaginas + ")" : "") + " · Para ti: " +
+    (trazaPaginas ? " (" + trazaPaginas + ")" : "") + " · Descubre: " + okDescubre +
+    "/" + DESCUBRE.length + " fila(s)" + " · Para ti: " +
     (paraTi ? "sí" : (conSesion ? "vacío" : "sin sesión"));
   if (filas.length === 0) {
     throw kino.error("unavailable", "home sin filas", {
-      userMessage: "Ni el riel Para ti ni tus páginas trajeron vídeos ahora mismo. Escribe debug para el informe."
+      userMessage: "Ni el riel Para ti, ni tus páginas, ni las filas Descubre trajeron vídeos ahora mismo. Escribe debug para el informe."
     });
   }
   return filas;
@@ -1901,8 +1973,9 @@ async function informarBusquedaViva() {
   const n = cargarMemoria().length;
   return ("BÚSQUEDA: cerrada con evidencia (0.2.2–0.2.6) — los resultados de Facebook viven " +
     "detrás de GraphQL con llaves que nacen de JavaScript, que el plugin no ejecuta. " +
-    "En su lugar, búsqueda LOCAL en la memoria: " + n + " vídeo(s) recordados (se llena " +
-    "con parati, tus páginas y enlaces).").slice(0, 440);
+    "En su lugar: búsqueda LOCAL en la memoria (" + n + " vídeo(s) recordados, se llena con " +
+    "parati, tus páginas y enlaces) y la PUERTA DE PÁGINAS: cualquier texto se prueba " +
+    "como nombre de página sin espacios (ej: videojuegos).").slice(0, 440);
 }
 
 async function informeDebug() {

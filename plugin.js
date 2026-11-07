@@ -14,7 +14,16 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-// FaceTrack 0.1.0 — Facebook en Kino: vídeos públicos, nada más.
+// FaceTrack 0.1.1 — Facebook en Kino: vídeos públicos, nada más.
+//
+// Novedades de la 0.1.1 (primeras pruebas del teléfono): el Inicio sin
+// páginas guardadas ya no lanza error (Kino muestra su aviso propio de
+// "sin catálogos"); los enlaces se abren con margen dentro del presupuesto
+// del buscador; si la página del enlace compartido no trae el vídeo, se
+// rescata el id de la dirección final a la que redirige; el caminador del
+// JSON lleva tope de profundidad (los árboles de Facebook son profundos);
+// y "debug" hace una prueba EN VIVO del último enlace pegado, paso a
+// paso, para saber qué le respondió Facebook al teléfono.
 //
 // Cómo funciona: Facebook entrega sus vídeos públicos como MP4 directo
 // escondidos en la página, dentro de bloques JSON <script data-sjs>
@@ -44,7 +53,7 @@
 // como "facebookexternalhit/1.1" (el rastreador de vistas previas del
 // propio Facebook), que no está limitado.
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 
 // La cara con la que se piden las páginas (un Chrome de escritorio).
 const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -55,6 +64,7 @@ const UA_VIDEO = "facebookexternalhit/1.1";
 let trazaBusqueda = "";
 let trazaHome = "";
 let trazaResolve = "";
+let trazaError = "";
 
 // Caché de los vídeos de cada página pedida (30 min): el Inicio y el
 // "Ver más" de una misma fila no gastan dos descargas iguales.
@@ -62,14 +72,14 @@ var cachePag = {};
 
 // ---------- pedir páginas ----------
 
-async function pedir(url, tope) {
+async function pedir(url, tope, tiempoMs) {
   const r = await kino.fetch(url, {
     headers: {
       "User-Agent": UA_PAGINA,
       "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "Accept-Language": "es-ES,es;q=0.9,es-419;q=0.8,en;q=0.7"
     },
-    timeoutMs: 14000,
+    timeoutMs: tiempoMs || 12000,
     maxBytes: tope || 1800000
   });
   if (!r.ok) throw kino.error("unavailable", "HTTP " + r.status + " en " + url.slice(0, 90));
@@ -113,16 +123,18 @@ function esVideo(n) {
   return false;
 }
 
-// Camina el JSON en busca de vídeos (con tope de nodos para no perder el tiempo).
-function caminar(nodo, fuera, cuenta) {
+// Camina el JSON en busca de vídeos (con tope de nodos y de profundidad:
+// los árboles de Facebook son hondos, pero no hay vídeo a más de 200 pisos).
+function caminar(nodo, fuera, cuenta, profundidad) {
   if (!nodo || typeof nodo !== "object" || cuenta.n > 250000) return;
+  if (profundidad > 200) return;
   cuenta.n = cuenta.n + 1;
   if (Array.isArray(nodo)) {
-    for (let i = 0; i < nodo.length; i++) caminar(nodo[i], fuera, cuenta);
+    for (let i = 0; i < nodo.length; i++) caminar(nodo[i], fuera, cuenta, profundidad + 1);
     return;
   }
   if (esVideo(nodo)) fuera.push(nodo);
-  for (const k in nodo) caminar(nodo[k], fuera, cuenta);
+  for (const k in nodo) caminar(nodo[k], fuera, cuenta, profundidad + 1);
 }
 
 // Todos los vídeos de una página, sin repetir id.
@@ -130,7 +142,7 @@ function videosDeHtml(html) {
   const nodos = [];
   const cuenta = { n: 0 };
   const bloques = bloquesSjs(html);
-  for (let i = 0; i < bloques.length; i++) caminar(bloques[i], nodos, cuenta);
+  for (let i = 0; i < bloques.length; i++) caminar(bloques[i], nodos, cuenta, 0);
   const vistos = {};
   const fuera = [];
   for (let i = 0; i < nodos.length; i++) {
@@ -299,20 +311,66 @@ function enlaceFacebook(q) {
   return s;
 }
 
+// El id de vídeo escondido en una dirección de Facebook (si lo hay):
+// watch/?v=..., video.php?v=..., /videos/<id>, /reel/<id>.
+function idDeUrl(url) {
+  const u = String(url || "");
+  const rutas = [
+    /[?&]v=([A-Za-z0-9_-]{5,40})/,
+    /\/videos\/([A-Za-z0-9_-]{5,40})/,
+    /\/reel\/([A-Za-z0-9_-]{5,40})/,
+    /\/video\/([A-Za-z0-9_-]{5,40})/
+  ];
+  for (let i = 0; i < rutas.length; i++) {
+    const m = rutas[i].exec(u);
+    if (m) return m[1];
+  }
+  return "";
+}
+
+// ¿Pinta a muro de sesión la página que llegó?
+function pintaMuro(html) {
+  return html.indexOf("login_form") >= 0 || html.indexOf("Log into Facebook") >= 0 ||
+    html.indexOf("Iniciar sesión en Facebook") >= 0;
+}
+
 // El ítem de un enlace pegado: se abre la página y se lee su vídeo.
 async function itemDeEnlace(url) {
   trazaBusqueda = "enlace pegado: " + url.slice(0, 80);
-  const r = await pedir(url, 1800000);
+  let r = null;
+  try {
+    r = await pedir(url, 1200000, 11000);
+  } catch (e) {
+    trazaError = "al abrir el enlace: " + String(e && e.message ? e.message : e).slice(0, 140);
+    throw kino.error("not_found", "no se pudo abrir " + url.slice(0, 80), {
+      userMessage: "No pude abrir ese enlace. Revisa tu conexión y prueba de nuevo; escribiendo debug sale el informe."
+    });
+  }
   const html = r.text();
+  try { kino.storage.set("fbUltimo", url); } catch (e) { /* sin almacén: solo diagnóstico */ }
   const videos = videosDeHtml(html);
   const posterOg = metaOg(html, "og:image");
+  trazaBusqueda = "enlace: HTTP " + r.status + ", " + html.length + " caracteres, " +
+    videos.length + " vídeo(s), muro de sesión: " + (pintaMuro(html) ? "sí" : "no");
   if (videos.length > 0) {
     const it = itemDeVideo(videos[0], "", posterOg);
     if (it) return [it];
   }
-  // Respaldo: algunas páginas de vídeo anuncian el MP4 en las meta etiquetas.
+  // Los /share/ a veces redirigen a una dirección con el id: se rescata de ahí.
+  const idFinal = idDeUrl(r.url || url);
   const og = metaOg(html, "og:video:secure_url") || metaOg(html, "og:video:url") || metaOg(html, "og:video");
   const tituloOg = metaOg(html, "og:title") || "Video de Facebook";
+  if (idFinal) {
+    trazaBusqueda = trazaBusqueda + " → id rescatado de la dirección final";
+    return [{
+      id: "fbv." + idFinal,
+      ref: "v:" + idFinal,
+      title: tituloOg.slice(0, 140),
+      kind: "movie",
+      poster: posterOg || undefined,
+      overview: "Enlace pegado · se resuelve al reproducir"
+    }];
+  }
   if (og) {
     return [{
       id: "fbv." + hashDe(og),
@@ -323,8 +381,10 @@ async function itemDeEnlace(url) {
       overview: "Enlace pegado · se resuelve al reproducir"
     }];
   }
+  trazaError = "la página del enlace no trajo vídeo (" + html.length + " caracteres" +
+    (pintaMuro(html) ? ", muro de sesión" : "") + ")";
   throw kino.error("not_found", "sin vídeo en " + url.slice(0, 90), {
-    userMessage: "Ese enlace no trajo un vídeo: puede ser privado, haberse borrado o pedir iniciar sesión."
+    userMessage: "Ese enlace no trajo un vídeo: puede ser privado, haberse borrado o pedir iniciar sesión. Escribe debug para el informe."
   });
 }
 
@@ -357,9 +417,13 @@ async function videosDePagina(slug) {
     "https://www.facebook.com/" + slug + "/videos/",
     "https://www.facebook.com/" + slug + "/"
   ];
+  const inicio = Date.now();
   for (let i = 0; i < urls.length && nodos.length === 0; i++) {
+    // El buscador tiene un presupuesto: si la primera dirección ya lo gastó,
+    // no se espera a la segunda (mejor un aviso honesto que un timeout).
+    if (i > 0 && Date.now() - inicio > 6000) break;
     try {
-      const r = await pedir(urls[i], 1800000);
+      const r = await pedir(urls[i], 1200000, 9000);
       nodos = videosDeHtml(r.text());
     } catch (e) { /* a la siguiente */ }
   }
@@ -409,7 +473,7 @@ export async function search(query) {
 
   // Informe técnico (como en TubeKino): escribir "debug" o "estado".
   const ql = q.toLowerCase();
-  if (ql === "debug" || ql === "estado") return informeDebug();
+  if (ql === "debug" || ql === "estado") return await informeDebug();
 
   // ¿Enlace pegado de Facebook?
   const enlace = enlaceFacebook(q);
@@ -435,6 +499,12 @@ export async function search(query) {
 
 export async function home() {
   const pags = paginasGuardadas();
+  // Sin páginas guardadas no hay error: Kino muestra su aviso propio de
+  // "sin catálogos" y en Ajustes está la guía de cómo guardarlas.
+  if (pags.length === 0) {
+    trazaHome = "portada: sin páginas guardadas (guarda hasta 6 en Ajustes)";
+    return [];
+  }
   const inicio = Date.now();
   const filas = [];
   let ok = 0;
@@ -458,10 +528,9 @@ export async function home() {
   }
   trazaHome = "portada: " + ok + "/" + pags.length + " páginas con vídeos";
   if (filas.length === 0) {
-    const mensaje = pags.length === 0
-      ? "Sin páginas todavía: en Ajustes guarda hasta 6 páginas tuyas (el nombre que va tras facebook.com/) y cada una será una fila aquí."
-      : "Ninguna de tus páginas trajo vídeos públicos ahora mismo. Revisa los nombres en Ajustes o prueba de nuevo en un rato.";
-    throw kino.error("unavailable", "home sin filas", { userMessage: mensaje });
+    throw kino.error("unavailable", "home sin filas", {
+      userMessage: "Ninguna de tus páginas trajo vídeos públicos ahora mismo. Revisa los nombres en Ajustes o prueba de nuevo en un rato."
+    });
   }
   return filas;
 }
@@ -543,14 +612,18 @@ function streamDeHtml(html, id) {
 export async function resolve(ref, options) {
   ref = String(ref || "");
   trazaResolve = "ref " + ref.slice(0, 70);
+  trazaError = "";
 
   // Enlace completo guardado (cuando no había id numérico).
   if (ref.indexOf("u:") === 0) {
     const url = ref.slice(2);
-    const r = await pedir(url, 1800000);
+    const r = await pedir(url, 1800000, 12000);
     try {
-      return streamDeHtml(r.text(), null);
+      const s = streamDeHtml(r.text(), null);
+      trazaResolve = "enlace → MP4 " + (s.label || "");
+      return s;
     } catch (e) {
+      trazaError = "enlace sin vídeo reproducible";
       throw kino.error("not_found", "enlace sin vídeo: " + String(e && e.message ? e.message : e).slice(0, 120), {
         userMessage: "Facebook no entregó este vídeo: puede ser privado, haberse borrado o pedir iniciar sesión."
       });
@@ -566,25 +639,30 @@ export async function resolve(ref, options) {
       "https://m.facebook.com/watch/?v=" + encodeURIComponent(id) + "&_rnr"
     ];
     let ultimo = null;
+    const inicio = Date.now();
     for (let i = 0; i < intentos.length; i++) {
+      // El respaldo m. solo si queda tiempo para él.
+      if (i > 0 && Date.now() - inicio > 10000) break;
       let h = "";
       try {
-        h = (await pedir(intentos[i], 1800000)).text();
+        h = (await pedir(intentos[i], 1800000, 12000)).text();
       } catch (e) {
         ultimo = e;
+        trazaError = "HTTP fallo en " + intentos[i].slice(0, 50) + ": " + String(e && e.message ? e.message : e).slice(0, 100);
         continue;
       }
       try {
         const s = streamDeHtml(h, id);
-        trazaResolve = "v:" + id + " → MP4 " + (s.label || "") + " (intento " + (i + 1) + ")";
+        trazaResolve = "v:" + id + " → MP4 " + (s.label || "") + " (intento " + (i + 1) + ", " + h.length + " caracteres)";
         return s;
       } catch (e) {
         ultimo = e;
+        trazaError = "página del vídeo sin MP4 (" + h.length + " caracteres, muro: " + (pintaMuro(h) ? "sí" : "no") + ")";
       }
     }
     throw kino.error("not_found", "Facebook no entregó el vídeo " + id + ": " +
       (ultimo ? String(ultimo && ultimo.message ? ultimo.message : ultimo).slice(0, 120) : "sin enlaces"), {
-      userMessage: "Facebook no entregó este vídeo: puede ser privado, haberse borrado o pedir iniciar sesión."
+      userMessage: "Facebook no entregó este vídeo: puede ser privado, haberse borrado o pedir iniciar sesión. Escribe debug para el informe."
     });
   }
 
@@ -603,14 +681,49 @@ export async function settingsStatus() {
 
 // ---------- informe técnico (buscando "debug") ----------
 
-function informeDebug() {
+// La prueba EN VIVO: abre el último enlace pegado y cuenta, paso a paso,
+// qué le respondió Facebook — el informe que dice la verdad del teléfono.
+async function informarEnVivo(url) {
+  if (!url) return "EN VIVO: sin enlace previo (pega un enlace y vuelve a escribir debug)";
+  let paso = "EN VIVO " + url.slice(0, 70) + " → ";
+  try {
+    const r = await pedir(url, 1200000, 11000);
+    const html = r.text();
+    const videos = videosDeHtml(html);
+    paso = paso + "HTTP " + r.status + " · " + html.length + " caracteres" +
+      " · dirección final: " + String(r.url || url).slice(0, 70);
+    paso = paso + " · bloques data-sjs: " + bloquesSjs(html).length +
+      " · vídeos encontrados: " + videos.length +
+      " · muro de sesión: " + (pintaMuro(html) ? "SÍ" : "no");
+    if (videos.length > 0) {
+      const u = urlsDeVideo(videos[0]);
+      paso = paso + " · primer vídeo id " + String(videos[0].id || "-") +
+        " · MP4 HD: " + (u.hd ? "sí" : "no") + " · MP4 SD: " + (u.sd ? "sí" : "no");
+    } else {
+      const og = metaOg(html, "og:video:secure_url") || metaOg(html, "og:video:url") || metaOg(html, "og:video");
+      const idFinal = idDeUrl(r.url || url);
+      paso = paso + " · og:video: " + (og ? "sí" : "no") + " · id en la dirección final: " + (idFinal || "no");
+    }
+    return paso;
+  } catch (e) {
+    return paso + "ERROR al abrir: " + String(e && e.message ? e.message : e).slice(0, 120);
+  }
+}
+
+async function informeDebug() {
   const pags = paginasGuardadas();
+  let ultimo = "";
+  try { ultimo = String(kino.storage.get("fbUltimo") || ""); } catch (e) { /* sin almacén */ }
+  const vivo = await informarEnVivo(ultimo);
+  // La prueba en vivo va PRIMERO: es lo que dice la verdad del teléfono.
   const lineas = [
+    vivo,
     "FaceTrack " + VERSION + " — informe",
     "Páginas guardadas: " + pags.length + (pags.length ? " (" + pags.map(function (p) { return p.slug; }).join(", ") + ")" : ""),
     "Última búsqueda: " + (trazaBusqueda || "—"),
     "Último Inicio: " + (trazaHome || "—"),
     "Última reproducción: " + (trazaResolve || "—"),
+    "Último fallo: " + (trazaError || "—"),
     "Caché de páginas: " + Object.keys(cachePag).length
   ];
   return [{
@@ -618,7 +731,7 @@ function informeDebug() {
     ref: "debug",
     title: "FaceTrack — informe técnico",
     kind: "movie",
-    overview: lineas.join(" · ")
+    overview: lineas.join(" · ").slice(0, 480)
   }];
 }
 

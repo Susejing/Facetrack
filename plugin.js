@@ -14,6 +14,20 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+// FaceTrack 0.3.1 — el informe que se deja leer.
+//
+// La prueba del teléfono con la 0.3.0 (13:16) dejó dos verdades:
+// (1) «parati» se cayó con el mensaje genérico de Kino («Ningún
+// plugin respondió») y el error se perdió sin rastro; (2) el informe
+// «debug» se corta a 900 caracteres y la parte larga de la prueba en
+// vivo se comía TODAS las líneas de diagnóstico — «Última búsqueda»,
+// «Último fallo» y «Memoria» jamás llegaban a verse en la pantalla.
+// Arreglos de esta versión: el informe pone PRIMERO las líneas que
+// deciden (sesión, búsquedas, fallo, memoria) y la prueba en vivo va
+// al final, que es lo que se corta; y «parati» queda blindado — si
+// el riel falla, la causa queda registrada en «Último fallo» y sale
+// un mensaje honesto en vez del genérico.
+
 // FaceTrack 0.3.0 — la memoria del plugin.
 //
 // VEREDICTO con el que se construye esta versión: la búsqueda por
@@ -265,7 +279,7 @@
 // como "facebookexternalhit/1.1" (el rastreador de vistas previas del
 // propio Facebook), que no está limitado.
 
-const VERSION = "0.3.0";
+const VERSION = "0.3.1";
 
 // La cara con la que se piden las páginas (un Chrome de escritorio).
 const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -1432,8 +1446,21 @@ export async function search(query) {
       });
     }
     trazaBusqueda = "para ti (con sesión)";
-    const items = await itemsDeParaTi(30);
+    let items;
+    try {
+      items = await itemsDeParaTi(30);
+    } catch (e) {
+      // El riel falló a medio camino (fetch, cara, parse): que quede
+      // el rastro en «Último fallo» y un mensaje honesto — nunca el
+      // genérico de Kino que no dice nada.
+      const motivo = String((e && e.message) ? e.message : e).slice(0, 120);
+      trazaError = "para ti: " + motivo;
+      throw kino.error("unavailable", "para ti falló: " + motivo, {
+        userMessage: "El riel Para ti falló al abrirse (" + motivo + "). Escribe debug: la línea «Último fallo» guarda la causa."
+      });
+    }
     if (items.length > 0) return items;
+    trazaError = "para ti vacío (reels y watch sin vídeos)";
     throw kino.error("not_found", "para ti vacío", {
       userMessage: "El riel Para ti no trajo vídeos ahora mismo. Escribe debug para el informe."
     });
@@ -1804,12 +1831,11 @@ async function informeDebug() {
   const pags = paginasGuardadas();
   let ultimo = "";
   try { ultimo = String(kino.storage.get("fbUltimo") || ""); } catch (e) { /* sin almacén */ }
-  const vivo = await informarEnVivo(ultimo);
-  const vivoBusca = await informarBusquedaViva();
-  // La prueba en vivo va PRIMERO: es lo que dice la verdad del teléfono.
-  const lineas = [
-    vivo,
-    vivoBusca,
+  // PRIMERO las líneas que deciden el diagnóstico (sesión, búsquedas,
+  // fallo, memoria): el tope de 900 caracteres corta lo ÚLTIMO, y si la
+  // prueba en vivo (larga) va primero, se come la verdad — lección de
+  // la 0.3.0 en el teléfono. La prueba en vivo va al final.
+  const claves = [
     "FaceTrack " + VERSION + " — informe",
     "Sesión: " + (sesionActiva() ? "activa (c_user/xs)" : (galletasSesion() ? "galletas sin c_user/xs" : "sin sesión")) + " · ventanita: " + (hayVentanita() ? "sí" : "no"),
     "Páginas guardadas: " + pags.length + (pags.length ? " (" + pags.map(function (p) { return p.slug; }).join(", ") + ")" : ""),
@@ -1820,12 +1846,14 @@ async function informeDebug() {
     "Caché de páginas: " + Object.keys(cachePag).length,
     "Memoria: " + cargarMemoria().length + " vídeo(s) para la búsqueda local"
   ];
+  const vivo = await informarEnVivo(ultimo);
+  const vivoBusca = await informarBusquedaViva();
   return [{
     id: "fbv.debug",
     ref: "debug",
     title: "FaceTrack — informe técnico",
     kind: "movie",
-    overview: lineas.join(" · ").slice(0, 900)
+    overview: (claves.join(" · ") + " || " + vivo + " || " + vivoBusca).slice(0, 900)
   }];
 }
 
@@ -1873,7 +1901,7 @@ export async function action(key) {
       return { message: "La ventanita no pudo abrir: " + cod.slice(0, 100) };
     }
     if (r && r.status === "done" && r.stored) {
-      return { message: "Sesión lista: el riel Para ti, la búsqueda real y las páginas completas ya están disponibles." };
+      return { message: "Sesión lista: el riel Para ti y las páginas completas ya están disponibles. La búsqueda por palabras es local (filtra lo ya visto en el plugin)." };
     }
     if (r && r.status === "timeout") {
       return { message: "Se acabó el tiempo de la ventana sin terminar el login. Inténtalo de nuevo." };

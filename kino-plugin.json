@@ -1,10 +1,10 @@
 {
   "id": "facetrack",
   "name": "FaceTrack — Facebook",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "apiVersion": 19,
   "entry": "plugin.js",
-  "description": "Vídeos de Facebook en Kino: pega enlaces (fb.watch, watch, reels, share) o escribe el nombre de una página; hasta 6 páginas tuyas como filas del Inicio. Con tu cuenta (Ajustes ▸ Iniciar sesión): tu riel Para ti y la búsqueda real.",
+  "description": "Vídeos de Facebook en Kino: pega enlaces (fb.watch, watch, reels, share) o escribe el nombre de una página; tus páginas como filas del Inicio. Con tu cuenta (Ajustes ▸ Iniciar sesión): tu riel Para ti y la búsqueda real.",
   "author": "Susejing",
   "homepage": "https://github.com/Susejing/Facetrack",
   "hosts": [
@@ -64,79 +64,27 @@
       "key": "paginas",
       "label": "Tus páginas",
       "type": "section",
-      "hint": "Hasta 6 páginas de Facebook. En cada una escribe su nombre (lo que va tras facebook.com/, ej: Crunchyroll) o pega su enlace. Cada página será una fila del Inicio. Los enlaces de vídeos sueltos se pegan directo en el buscador de Kino."
+      "hint": "Tus páginas de Facebook como filas del Inicio: agrega cada una con su nombre (lo que va tras facebook.com/, ej: Crunchyroll) o su enlace, y si quieres, el nombre de su fila."
     },
     {
-      "key": "pag1",
-      "label": "Página 1",
-      "type": "text",
-      "hint": "Nombre de la página o su enlace"
-    },
-    {
-      "key": "fila1",
-      "label": "Nombre de la fila 1",
-      "type": "text",
-      "hint": "Opcional: cómo se llama la fila en el Inicio"
-    },
-    {
-      "key": "pag2",
-      "label": "Página 2",
-      "type": "text",
-      "hint": "Nombre de la página o su enlace"
-    },
-    {
-      "key": "fila2",
-      "label": "Nombre de la fila 2",
-      "type": "text",
-      "hint": "Opcional"
-    },
-    {
-      "key": "pag3",
-      "label": "Página 3",
-      "type": "text",
-      "hint": "Nombre de la página o su enlace"
-    },
-    {
-      "key": "fila3",
-      "label": "Nombre de la fila 3",
-      "type": "text",
-      "hint": "Opcional"
-    },
-    {
-      "key": "pag4",
-      "label": "Página 4",
-      "type": "text",
-      "hint": "Nombre de la página o su enlace"
-    },
-    {
-      "key": "fila4",
-      "label": "Nombre de la fila 4",
-      "type": "text",
-      "hint": "Opcional"
-    },
-    {
-      "key": "pag5",
-      "label": "Página 5",
-      "type": "text",
-      "hint": "Nombre de la página o su enlace"
-    },
-    {
-      "key": "fila5",
-      "label": "Nombre de la fila 5",
-      "type": "text",
-      "hint": "Opcional"
-    },
-    {
-      "key": "pag6",
-      "label": "Página 6",
-      "type": "text",
-      "hint": "Nombre de la página o su enlace"
-    },
-    {
-      "key": "fila6",
-      "label": "Nombre de la fila 6",
-      "type": "text",
-      "hint": "Opcional"
+      "key": "misPaginas",
+      "label": "Páginas",
+      "type": "list",
+      "max": 12,
+      "fields": [
+        {
+          "key": "pag",
+          "label": "Página",
+          "type": "text",
+          "hint": "Su nombre (lo que va tras facebook.com/, ej: Crunchyroll) o su enlace"
+        },
+        {
+          "key": "fila",
+          "label": "Nombre de la fila",
+          "type": "text",
+          "hint": "Opcional: cómo se llama la fila en el Inicio"
+        }
+      ]
     },
     {
       "key": "estado",

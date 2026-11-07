@@ -14,6 +14,21 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+// FaceTrack 0.2.1 — la lista de páginas.
+//
+// Qué pasó con la 0.2.0: le sumó tres ajustes de cookies a los 12 que
+// ya había, y Kino solo admite 12 ajustes CON VALOR por plugin (sección,
+// acción y estado no cuentan porque no guardan nada). El manifiesto
+// quedó rebotado con "error en su kino-plugin.json" y el plugin no se
+// actualizaba. El arreglo: las 12 casillas de páginas (Página 1..6 y
+// Nombre de la fila 1..6) se funden en UNA lista, «Tus páginas», donde
+// cada entrada trae su página y, si quiere, el nombre de su fila —
+// hasta 12 páginas en un solo ajuste, y sobra espacio para los tres
+// campos de cookies (el respaldo a mano de la ventanita). OJO: quien
+// venía de la 0.1.x tiene que volver a escribir sus páginas en la
+// lista nueva (las casillas viejas se van con sus valores); es una
+// sola vez. Todo lo demás queda como en la 0.2.0.
+
 // FaceTrack 0.2.0 — Facebook en Kino: ahora también con tu cuenta.
 //
 // Novedades de la 0.2.0 (la ventanita de sesión): en Ajustes del plugin
@@ -147,7 +162,7 @@
 // como "facebookexternalhit/1.1" (el rastreador de vistas previas del
 // propio Facebook), que no está limitado.
 
-const VERSION = "0.2.0";
+const VERSION = "0.2.1";
 
 // La cara con la que se piden las páginas (un Chrome de escritorio).
 const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -838,15 +853,22 @@ async function itemsDePagina(slug, limite, nombrePagina) {
   return items;
 }
 
-// Las páginas guardadas en Ajustes (hasta 6).
+// Las páginas guardadas en Ajustes: la lista «Tus páginas», donde cada
+// entrada trae su página y, si quiere, el nombre de su fila. (Antes eran
+// 12 casillas sueltas; Kino solo admite 12 ajustes con valor y las
+// cookies necesitaban el espacio.)
 function paginasGuardadas() {
   const fuera = [];
-  for (let i = 1; i <= 6; i++) {
-    const bruto = String(kino.config.get("pag" + i) || "").trim();
+  let entradas = null;
+  try { entradas = kino.config.get("misPaginas"); } catch (e) { entradas = null; }
+  if (!Array.isArray(entradas)) return fuera;
+  for (let i = 0; i < entradas.length; i++) {
+    const e = entradas[i] || {};
+    const bruto = String(e.pag || "").trim();
     if (!bruto) continue;
     const slug = slugDe(bruto);
     if (!slug) continue;
-    fuera.push({ slug: slug, nombre: String(kino.config.get("fila" + i) || "").trim() });
+    fuera.push({ slug: slug, nombre: String(e.fila || "").trim() });
   }
   return fuera;
 }
@@ -1015,7 +1037,7 @@ export async function home() {
   // Sin páginas ni sesión no hay error: Kino muestra su aviso propio de
   // "sin catálogos" y en Ajustes está la guía de cómo empezar.
   if (pags.length === 0 && !conSesion) {
-    trazaHome = "portada: sin páginas guardadas (guarda hasta 6 en Ajustes)";
+    trazaHome = "portada: sin páginas guardadas (agrega páginas en la lista de Ajustes)";
     return [];
   }
   const inicio = Date.now();

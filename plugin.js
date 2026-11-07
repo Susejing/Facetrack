@@ -14,7 +14,20 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-// FaceTrack 0.1.2 — Facebook en Kino: vídeos públicos, nada más.
+// FaceTrack 0.1.3 — Facebook en Kino: vídeos públicos, nada más.
+//
+// Novedades de la 0.1.3 (el segundo informe del teléfono encontró al
+// culpable): la escalera de la 0.1.2 funcionó — una cara pasó y la página
+// del vídeo bajó entera (445 mil caracteres) — pero "vídeos: 0": la página
+// era un REEL, y en los reels el vídeo vive en un nodo interior que llega
+// SIN su número de identificación (lo lleva el nodo papá). El cazador
+// viejo exigía ese número y tiraba el vídeo a la basura. Ahora: (1) el
+// caminador PRESTA la cédula del papá al vídeo sin id (y si tampoco hay
+// papá con cédula, inventa una a partir del enlace del MP4); (2) el
+// respaldo a ojo en el HTML crudo también busca las marcas doble-escapadas
+// (\"playable_url\"); (3) al reproducir un id se prueban también las
+// direcciones de reel (www./reel/<id> y m./reel/<id>): los reels no siempre
+// responden en video.php.
 //
 // Novedades de la 0.1.2 (el informe del teléfono dijo la verdad): al
 // abrir el enlace compartido, Facebook respondió "HTTP 400": rechazo en
@@ -65,7 +78,7 @@
 // como "facebookexternalhit/1.1" (el rastreador de vistas previas del
 // propio Facebook), que no está limitado.
 
-const VERSION = "0.1.2";
+const VERSION = "0.1.3";
 
 // La cara con la que se piden las páginas (un Chrome de escritorio).
 const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -180,56 +193,125 @@ function esVideo(n) {
   if (!n || typeof n !== "object" || Array.isArray(n)) return false;
   if (n.__typename === "Video") return true;
   // Algunas páginas traen el vídeo sin la etiqueta, pero con enlaces.
-  if ((n.browser_native_hd_url || n.browser_native_sd_url || n.playable_url || n.progressive_urls) &&
-      (n.id || n.videoId)) return true;
+  // LOS REELS llegan así y SIN id: el id lo lleva el nodo papá, y el
+  // caminador se lo presta — no se vuelve a exigir aquí.
+  if (n.browser_native_hd_url || n.browser_native_sd_url || n.playable_url || n.progressive_urls) return true;
   return false;
 }
 
 // Camina el JSON en busca de vídeos (con tope de nodos y de profundidad:
 // los árboles de Facebook son hondos, pero no hay vídeo a más de 200 pisos).
-function caminar(nodo, fuera, cuenta, profundidad) {
+// ctxId es la cédula del nodo papá. ctxVideo es el vídeo papá SIN enlaces
+// (el caso del reel): cuando un hijo suyo trae los enlaces, se los sube
+// con la cédula del vídeo, no la de cualquier nodo del camino.
+function caminar(nodo, fuera, cuenta, profundidad, ctxId, ctxVideo) {
   if (!nodo || typeof nodo !== "object" || cuenta.n > 250000) return;
   if (profundidad > 200) return;
   cuenta.n = cuenta.n + 1;
   if (Array.isArray(nodo)) {
-    for (let i = 0; i < nodo.length; i++) caminar(nodo[i], fuera, cuenta, profundidad + 1);
+    for (let i = 0; i < nodo.length; i++) caminar(nodo[i], fuera, cuenta, profundidad + 1, ctxId, ctxVideo);
     return;
   }
-  if (esVideo(nodo)) fuera.push(nodo);
-  for (const k in nodo) caminar(nodo[k], fuera, cuenta, profundidad + 1);
+  let miId = "";
+  if (typeof nodo.id === "string" || typeof nodo.id === "number") miId = String(nodo.id);
+  if (!miId && (typeof nodo.videoId === "string" || typeof nodo.videoId === "number")) miId = String(nodo.videoId);
+  let videoPapa = ctxVideo;
+  if (esVideo(nodo)) {
+    const u = urlsDeVideo(nodo);
+    if (u.hd || u.sd) {
+      if (ctxVideo) {
+        // El vídeo del reel: el hijo trae los enlaces, el papá la cédula
+        // y el título. Se hereda del papá lo que falte.
+        nodo.__id = ctxVideo.__id || miId || ctxId || "";
+        for (const k in ctxVideo) {
+          if (k.charAt(0) === "_") continue;
+          if (ctxVideo[k] !== undefined && ctxVideo[k] !== null &&
+              (nodo[k] === undefined || nodo[k] === null)) nodo[k] = ctxVideo[k];
+        }
+      } else {
+        nodo.__id = miId || ctxId || "";
+      }
+      fuera.push(nodo);
+      videoPapa = null;
+    } else {
+      // Vídeo sin enlaces propios: sus hijos con enlaces le pertenecen.
+      nodo.__id = miId || ctxId || "";
+      fuera.push(nodo);
+      videoPapa = nodo;
+    }
+  }
+  for (const k in nodo) caminar(nodo[k], fuera, cuenta, profundidad + 1, miId || ctxId, videoPapa);
 }
 
-// Todos los vídeos de una página, sin repetir id.
+// Todos los vídeos de una página, sin repetir id. Si el mismo id aparece
+// en dos nodos (el reel: el papá con la cédula, el hijo con los enlaces),
+// gana el que trae los enlaces, heredando del otro lo que le falte.
 function videosDeHtml(html) {
   const nodos = [];
   const cuenta = { n: 0 };
   const bloques = bloquesSjs(html);
-  for (let i = 0; i < bloques.length; i++) caminar(bloques[i], nodos, cuenta, 0);
-  const vistos = {};
-  const fuera = [];
+  for (let i = 0; i < bloques.length; i++) caminar(bloques[i], nodos, cuenta, 0, "");
+  const porId = {};
+  const orden = [];
   for (let i = 0; i < nodos.length; i++) {
-    const id = String(nodos[i].id || nodos[i].videoId || "");
-    if (!id || vistos[id]) continue;
-    vistos[id] = 1;
-    fuera.push(nodos[i]);
+    let id = String(nodos[i].id || nodos[i].videoId || nodos[i].__id || "");
+    const u = urlsDeVideo(nodos[i]);
+    if (!id) {
+      // Ni cédula propia ni prestada: se inventa una a partir del MP4,
+      // solo para no repetir el mismo vídeo en la lista.
+      const base = u.hd || u.sd || "";
+      id = base ? "fb" + hashDe(base).slice(0, 12) : "";
+    }
+    if (!id) continue;
+    if (!porId[id]) {
+      porId[id] = { nodo: nodos[i], urls: u };
+      orden.push(id);
+    } else {
+      const prev = porId[id];
+      if ((!prev.urls.hd && !prev.urls.sd) && (u.hd || u.sd)) {
+        const nuevo = nodos[i];
+        for (const k in prev.nodo) {
+          if (k.charAt(0) === "_") continue;
+          if (prev.nodo[k] !== undefined && prev.nodo[k] !== null &&
+              (nuevo[k] === undefined || nuevo[k] === null)) nuevo[k] = prev.nodo[k];
+        }
+        prev.nodo = nuevo;
+        prev.urls = u;
+      }
+    }
+  }
+  const fuera = [];
+  for (let i = 0; i < orden.length; i++) {
+    const e = porId[orden[i]];
+    e.nodo.__id = orden[i];
+    fuera.push(e.nodo);
   }
   return fuera;
 }
 
 // Respaldo plano: si el JSON no se dejó leer, los enlaces también se
-// encuentran a ojo en el HTML crudo.
+// encuentran a ojo en el HTML crudo. Las marcas a veces vienen
+// doble-escapadas (\"playable_url\"): se des-escapa y se caza otra vez.
 function urlsCrudas(html) {
   const fuera = { hd: "", sd: "" };
-  const rx = /"(browser_native_hd_url|browser_native_sd_url|playable_url_quality_hd|playable_url)":"((?:[^"\\]|\\.)*)"/g;
-  let m;
-  while ((m = rx.exec(html)) !== null) {
-    const u = soltar(m[2]);
-    if (!u || u.indexOf("http") !== 0) continue;
-    if (/\.mpd(\?|$)/i.test(u) || /\.m3u8(\?|$)/i.test(u)) continue;
-    if (m[1] === "browser_native_hd_url" || m[1] === "playable_url_quality_hd") {
-      if (!fuera.hd) fuera.hd = u;
-    } else {
-      if (!fuera.sd) fuera.sd = u;
+  const cazas = [html];
+  try {
+    cazas.push(html
+      .replace(/\\"/g, '"')
+      .replace(/\\\\u([0-9a-fA-F]{4})/g, function (m, h) { return String.fromCharCode(parseInt(h, 16)); }));
+  } catch (e) { /* se caza sobre el original */ }
+  for (let c = 0; c < cazas.length; c++) {
+    const rx = /"(browser_native_hd_url|browser_native_sd_url|playable_url_quality_hd|playable_url)":"((?:[^"\\]|\\.)*)"/g;
+    let m;
+    while ((m = rx.exec(cazas[c])) !== null) {
+      const u = soltar(m[2]);
+      if (!u || u.indexOf("http") !== 0) continue;
+      if (/\.mpd(\?|$)/i.test(u) || /\.m3u8(\?|$)/i.test(u)) continue;
+      if (m[1] === "browser_native_hd_url" || m[1] === "playable_url_quality_hd") {
+        if (!fuera.hd) fuera.hd = u;
+      } else {
+        if (!fuera.sd) fuera.sd = u;
+      }
     }
   }
   return fuera;
@@ -316,7 +398,7 @@ function haceTexto(segundos) {
 
 // Un nodo de vídeo convertido en tarjeta de Kino.
 function itemDeVideo(v, nombrePagina, posterRespaldo) {
-  const id = String(v.id || v.videoId || "");
+  const id = String(v.id || v.videoId || v.__id || "");
   if (!id) return null;
   const urls = urlsDeVideo(v);
   // Sin enlaces solo se acepta si el nodo es un Video de verdad:
@@ -643,7 +725,7 @@ function streamDeHtml(html, id) {
   let nodo = null;
   if (id) {
     for (let j = 0; j < nodos.length; j++) {
-      if (String(nodos[j].id || nodos[j].videoId || "") === id) { nodo = nodos[j]; break; }
+      if (String(nodos[j].id || nodos[j].videoId || nodos[j].__id || "") === id) { nodo = nodos[j]; break; }
     }
     if (!nodo && nodos.length === 1) nodo = nodos[0];
   } else if (nodos.length > 0) {
@@ -695,8 +777,10 @@ export async function resolve(ref, options) {
   if (ref.indexOf("v:") === 0) {
     const id = ref.slice(2);
     const intentos = [
+      "https://www.facebook.com/reel/" + encodeURIComponent(id),
       "https://www.facebook.com/video/video.php?v=" + encodeURIComponent(id),
       "https://www.facebook.com/watch/?v=" + encodeURIComponent(id),
+      "https://m.facebook.com/reel/" + encodeURIComponent(id),
       "https://m.facebook.com/watch/?v=" + encodeURIComponent(id) + "&_rnr"
     ];
     const inicio = Date.now();
@@ -751,7 +835,8 @@ async function informarEnVivo(url) {
     " · muro: " + (pintaMuro(html) ? "SÍ" : "no");
   if (videos.length > 0) {
     const u = urlsDeVideo(videos[0]);
-    return paso + " · id " + String(videos[0].id || "-") +
+    const propia = String(videos[0].id || videos[0].videoId || "");
+    return paso + " · id " + (propia || String(videos[0].__id || "-") + " (prestada)") +
       " · HD: " + (u.hd ? "sí" : "no") + " · SD: " + (u.sd ? "sí" : "no");
   }
   const og = metaOg(html, "og:video:secure_url") || metaOg(html, "og:video:url") || metaOg(html, "og:video");

@@ -14,6 +14,24 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+// FaceTrack 0.2.3 — el cascarón y el respaldo de páginas.
+//
+// El interrogatorio de la 0.2.2 contó la verdad del teléfono (7 nov):
+// las puertas de búsqueda de www contestan con un CASCARÓN — 730 mil
+// letras, 36 bloques JSON, sin muro, sin un solo vídeo. Los resultados
+// de búsqueda se cargan hoy por la puerta interna de Facebook (con
+// JavaScript), no en el HTML que le da al plugin. Pero en ese cascarón
+// Facebook SÍ nombra las páginas que coinciden con la búsqueda (sus
+// "username"). Así que esta versión: (1) prueba primero las puertas
+// nuevas — la búsqueda de Watch y la móvil — por si alguna aún
+// entrega resultados; (2) EL RESPALDO: si ninguna trae vídeos, caza
+// las páginas nombradas en el cascarón y va directo a por los vídeos
+// de la primera que exista (los vídeos de una página SÍ vienen
+// renderizados en el HTML). El informe «debug» cuenta ahora, por cada
+// puerta, los nodos de vídeo crudos (V:) y las páginas halladas
+// (págs:) — con eso se ve si el cascarón trae perfiles o si habrá que
+// ir a la puerta interna GraphQL.
+
 // FaceTrack 0.2.2 — el interrogatorio del buscador.
 //
 // Primera prueba del teléfono con la sesión puesta (7 nov): la 0.2.1
@@ -179,7 +197,7 @@
 // como "facebookexternalhit/1.1" (el rastreador de vistas previas del
 // propio Facebook), que no está limitado.
 
-const VERSION = "0.2.2";
+const VERSION = "0.2.3";
 
 // La cara con la que se piden las páginas (un Chrome de escritorio).
 const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -925,41 +943,73 @@ async function itemsDeParaTi(limite) {
 
 // ---------- búsqueda real y páginas seguidas (con sesión) ----------
 
-// Con sesión, la búsqueda de Facebook... EL INTERROGATORIO: hasta
-// cuatro puertas (la general y la de vídeos, en www y en m.), y la
-// primera se abre con la cara de NAVEGADOR aunque la escalera tenga
-// otra recordada (con las galletas puestas, esa cara es la que Facebook
-// toma en serio para buscar). Cada puerta deja su parte en la traza —
-// cara, letras, bloques JSON, muro, señal de MP4, vídeos — para que el
-// informe "debug" cuente qué le respondió Facebook.
+// Con sesión, la búsqueda de Facebook... EL CASCARÓN Y EL RESPALDO:
+// las puertas de búsqueda de www entregan un cascarón sin vídeos (los
+// resultados se cargan por la puerta interna), pero en el cascarón
+// Facebook nombra las páginas que coinciden. Se prueban primero las
+// puertas nuevas (Watch y la móvil) y, si ninguna trae vídeos, se va
+// directo a por los vídeos de la primera página nombrada. Cada puerta
+// deja su parte en la traza — cara, letras, JSON, muro, MP4, vídeos,
+// nodos V crudos y páginas halladas — para el informe "debug".
 async function itemsDeBusquedaReal(q, limite) {
   let nodos = [];
   const puertas = [
-    { nombre: "www.general", url: "https://www.facebook.com/search/top?q=" + encodeURIComponent(q) },
-    { nombre: "www.vídeos", url: "https://www.facebook.com/search/videos/?q=" + encodeURIComponent(q) },
+    { nombre: "watch", url: "https://www.facebook.com/watch/search/?q=" + encodeURIComponent(q) },
     { nombre: "m.general", url: "https://m.facebook.com/search/top?q=" + encodeURIComponent(q) },
-    { nombre: "m.vídeos", url: "https://m.facebook.com/search/videos/?q=" + encodeURIComponent(q) }
+    { nombre: "m.vídeos", url: "https://m.facebook.com/search/videos/?q=" + encodeURIComponent(q) },
+    { nombre: "www.general", url: "https://www.facebook.com/search/top?q=" + encodeURIComponent(q) },
+    { nombre: "www.vídeos", url: "https://www.facebook.com/search/videos/?q=" + encodeURIComponent(q) }
   ];
   const inicio = Date.now();
   const partes = [];
+  const candidatos = {};
   for (let i = 0; i < puertas.length && nodos.length === 0; i++) {
     if (i > 0 && Date.now() - inicio > 8000) break;
     const ab = await abrirFacebook(puertas[i].url, 1200000, 5000, false, i === 0);
     if (!ab.r) { partes.push(puertas[i].nombre + " ✗ " + ab.traza.join(",")); continue; }
     const html = ab.r.text();
     const n = videosDeHtml(html);
+    const plano = html.split('\\"').join('"');
+    const rxU = /"username":"([A-Za-z0-9.\-_]{2,60})"/g;
+    let mu;
+    while ((mu = rxU.exec(plano)) !== null) { if (!candidatos[mu[1]]) candidatos[mu[1]] = true; }
     partes.push(puertas[i].nombre + " " + ab.traza.join("→") + " · " + html.length + " car · json:" +
       (html.match(/data-sjs/g) || []).length + " · muro:" + (pintaMuro(html) ? "SÍ" : "no") +
-      " · MP4:" + (marcaVideo(html) ? "sí" : "no") + " · vídeos:" + n.length);
+      " · MP4:" + (marcaVideo(html) ? "sí" : "no") + " · vídeos:" + n.length +
+      " · V:" + Math.max((html.match(/"__typename":"Video"/g) || []).length,
+        (plano.match(/"__typename":"Video"/g) || []).length) +
+      " · págs:" + Object.keys(candidatos).length);
     if (n.length > 0) nodos = n;
   }
-  trazaBusqueda = ((trazaBusqueda && trazaBusqueda.indexOf("página: ") === 0 ? trazaBusqueda + " ‖ " : "") +
-    "búsqueda real «" + q.slice(0, 30) + "» ‖ " + partes.join(" ‖ ")).slice(0, 460);
-  const items = [];
+  let items = [];
   for (let i = 0; i < nodos.length && items.length < limite; i++) {
     const it = itemDeVideo(nodos[i], "", "");
     if (it) items.push(it);
   }
+  // EL RESPALDO: ninguna puerta trajo vídeos, pero el cascarón nombra
+  // páginas que casan con la búsqueda — se abre la primera y sus vídeos
+  // SON la respuesta. (Los vídeos de una página sí vienen renderizados.)
+  if (items.length === 0) {
+    const nombres = Object.keys(candidatos);
+    for (let c = 0; c < nombres.length && c < 2 && Date.now() - inicio < 10000; c++) {
+      const slug = slugDe(nombres[c]);
+      if (!slug) continue;
+      const ab = await abrirFacebook("https://www.facebook.com/" + slug + "/videos/", 1200000, 5000, false);
+      if (!ab.r) continue;
+      const n2 = videosDeHtml(ab.r.text());
+      for (let i2 = 0; i2 < n2.length && items.length < limite; i2++) {
+        const it = itemDeVideo(n2[i2], slug, "");
+        if (it) items.push(it);
+      }
+      if (items.length > 0) {
+        partes.push("respaldo: @" + slug + " → " + items.length + " vídeo(s)");
+        try { cachePag[slug] = { nodos: n2, t: Date.now() }; } catch (e) { /* sin caché */ }
+        break;
+      }
+    }
+  }
+  trazaBusqueda = ((trazaBusqueda && trazaBusqueda.indexOf("página: ") === 0 ? trazaBusqueda + " ‖ " : "") +
+    "búsqueda real «" + q.slice(0, 30) + "» ‖ " + partes.join(" ‖ ")).slice(0, 460);
   return items;
 }
 
@@ -1372,17 +1422,25 @@ async function informarBusquedaViva() {
   try { q = String(kino.storage.get("fbQ") || ""); } catch (e) { q = ""; }
   if (!q) return "BÚSQUEDA EN VIVO: sin búsqueda previa";
   const puertas = [
-    ["www.general", "https://www.facebook.com/search/top?q=" + encodeURIComponent(q)],
-    ["www.vídeos", "https://www.facebook.com/search/videos/?q=" + encodeURIComponent(q)]
+    ["watch", "https://www.facebook.com/watch/search/?q=" + encodeURIComponent(q)],
+    ["m.general", "https://m.facebook.com/search/top?q=" + encodeURIComponent(q)]
   ];
   const partes = [];
   for (let i = 0; i < puertas.length; i++) {
     const ab = await abrirFacebook(puertas[i][1], 1200000, 6000, false, true);
     if (!ab.r) { partes.push(puertas[i][0] + " ✗ " + ab.traza.join(",")); continue; }
     const html = ab.r.text();
+    const plano = html.split('\\"').join('"');
+    const rxU = /"username":"([A-Za-z0-9.\-_]{2,60})"/g;
+    const vistos = {};
+    let mu;
+    while ((mu = rxU.exec(plano)) !== null) { if (!vistos[mu[1]]) vistos[mu[1]] = true; }
     partes.push(puertas[i][0] + " " + ab.traza.join("→") + " · " + html.length + " car · json:" +
       (html.match(/data-sjs/g) || []).length + " · muro:" + (pintaMuro(html) ? "SÍ" : "no") +
-      " · MP4:" + (marcaVideo(html) ? "sí" : "no") + " · vídeos:" + videosDeHtml(html).length);
+      " · MP4:" + (marcaVideo(html) ? "sí" : "no") + " · vídeos:" + videosDeHtml(html).length +
+      " · V:" + Math.max((html.match(/"__typename":"Video"/g) || []).length,
+        (plano.match(/"__typename":"Video"/g) || []).length) +
+      " · págs:" + Object.keys(vistos).length);
   }
   return ("BÚSQUEDA EN VIVO «" + q.slice(0, 30) + "» ‖ " + partes.join(" ‖ ")).slice(0, 300);
 }

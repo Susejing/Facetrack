@@ -1,7 +1,7 @@
 {
   "id": "facetrack",
   "name": "FaceTrack — Facebook",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "apiVersion": 19,
   "entry": "plugin.js",
   "description": "Vídeos de Facebook en Kino: pega enlaces (fb.watch, watch, reels, share) o escribe el nombre de una página; tus páginas como filas del Inicio. Con tu cuenta (Ajustes ▸ Iniciar sesión): tu riel Para ti y la búsqueda real.",

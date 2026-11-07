@@ -1,7 +1,7 @@
 {
   "id": "facetrack",
   "name": "FaceTrack — Facebook",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "apiVersion": 19,
   "entry": "plugin.js",
   "description": "Vídeos de Facebook en Kino: pega enlaces (fb.watch, watch, reels, share) en el buscador y salta directo al vídeo, o escribe el nombre de una página para ver sus vídeos públicos. Hasta 6 páginas tuyas como filas del Inicio. Calidad alta cuando Facebook la trae; los enlaces se resuelven al momento de reproducir.",

@@ -14,7 +14,18 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-// FaceTrack 0.1.5 — Facebook en Kino: vídeos públicos, nada más.
+// FaceTrack 0.1.6 — Facebook en Kino: vídeos públicos, nada más.
+//
+// Novedades de la 0.1.6 (el testigo y la caza mayor, juntos): dos frentes
+// atacaron a la vez el mismo problema y aquí se funden en uno. La CAZA
+// MAYOR: cuando una página abre pero viene sin señal de vídeo
+// (marcaVideo), se sube la escalera DESDE ABAJO y solo se acepta la cara
+// que entregue la página CON vídeo. EL TESTIGO: el reproductor público de
+// incrustar (plugins/video.php?href=…), el que usan las webs para meter
+// vídeos de Facebook sin sesión — ahora es peldaño en el reproductor
+// (resolve) y pregunta estrella del detective: si el testigo tampoco
+// trae MP4, Facebook solo entrega ese reel con sesión. Sus enlaces
+// hd_src/sd_src ya cuentan como vídeo por todas partes.
 //
 // Novedades de la 0.1.5 (la caza mayor): el cuarto informe clavó la
 // verdad — la cara que abre la puerta entrega la página del reel VACÍA
@@ -110,7 +121,7 @@
 // como "facebookexternalhit/1.1" (el rastreador de vistas previas del
 // propio Facebook), que no está limitado.
 
-const VERSION = "0.1.5";
+const VERSION = "0.1.6";
 
 // La cara con la que se piden las páginas (un Chrome de escritorio).
 const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -197,13 +208,15 @@ async function abrirFacebook(url, tope, tiempoMs, sinMovil, reiniciar) {
 }
 
 // ¿El HTML crudo trae señal de vídeo? (algún enlace de MP4 por cualquier
-// rincón: playable_url, browser_native, progressive)
+// rincón: playable_url, browser_native, progressive, hd_src del testigo)
 function marcaVideo(html) {
   return typeof html === "string" && (
     html.indexOf("playable_url") >= 0 ||
     html.indexOf("browser_native_hd_url") >= 0 ||
     html.indexOf("browser_native_sd_url") >= 0 ||
-    html.indexOf("progressive_url") >= 0);
+    html.indexOf("progressive_url") >= 0 ||
+    html.indexOf("hd_src") >= 0 ||
+    html.indexOf("sd_src") >= 0);
 }
 
 // LA CAZA MAYOR: sube la escalera DESDE ABAJO (navegador, galletas,
@@ -343,8 +356,10 @@ function esVideo(n) {
   if (n.__typename === "Video") return true;
   // Algunas páginas traen el vídeo sin la etiqueta, pero con enlaces.
   // LOS REELS llegan así y SIN id: el id lo lleva el nodo papá, y el
-  // caminador se lo presta — no se vuelve a exigir aquí.
-  if (n.browser_native_hd_url || n.browser_native_sd_url || n.playable_url || n.progressive_urls) return true;
+  // caminador se lo presta — no se vuelve a exigir aquí. hd_src/sd_src
+  // son los enlaces del reproductor público de incrustar (el testigo).
+  if (n.browser_native_hd_url || n.browser_native_sd_url || n.playable_url ||
+      n.progressive_urls || n.hd_src || n.sd_src) return true;
   return false;
 }
 
@@ -452,13 +467,13 @@ function urlsCrudas(html) {
       .replace(/\\\\u([0-9a-fA-F]{4})/g, function (m, h) { return String.fromCharCode(parseInt(h, 16)); }));
   } catch (e) { /* se caza sobre el original */ }
   for (let c = 0; c < cazas.length; c++) {
-    const rx = /"(browser_native_hd_url|browser_native_sd_url|playable_url_quality_hd|playable_url)":"((?:[^"\\]|\\.)*)"/g;
+    const rx = /"(browser_native_hd_url|browser_native_sd_url|playable_url_quality_hd|playable_url|hd_src|sd_src)":"((?:[^"\\]|\\.)*)"/g;
     let m;
     while ((m = rx.exec(cazas[c])) !== null) {
       const u = soltar(m[2]);
       if (!u || u.indexOf("http") !== 0) continue;
       if (/\.mpd(\?|$)/i.test(u) || /\.m3u8(\?|$)/i.test(u)) continue;
-      if (m[1] === "browser_native_hd_url" || m[1] === "playable_url_quality_hd") {
+      if (m[1] === "browser_native_hd_url" || m[1] === "playable_url_quality_hd" || m[1] === "hd_src") {
         if (!fuera.hd) fuera.hd = u;
       } else {
         if (!fuera.sd) fuera.sd = u;
@@ -478,8 +493,8 @@ function urlsDeVideo(v) {
     if (legado && typeof legado[k] === "string" && legado[k]) return legado[k];
     return "";
   };
-  let hd = campo("browser_native_hd_url") || campo("playable_url_quality_hd");
-  let sd = campo("browser_native_sd_url") || campo("playable_url");
+  let hd = campo("browser_native_hd_url") || campo("playable_url_quality_hd") || campo("hd_src");
+  let sd = campo("browser_native_sd_url") || campo("playable_url") || campo("sd_src");
   const frag = v.videoDeliveryResponseFragment && v.videoDeliveryResponseFragment.videoDeliveryResponseResult;
   const prog = frag && Array.isArray(frag.progressive_urls) ? frag.progressive_urls : [];
   for (let i = 0; i < prog.length; i++) {
@@ -941,8 +956,15 @@ export async function resolve(ref, options) {
   // los MP4 firmados (caducan: por eso se resuelve al reproducir).
   if (ref.indexOf("v:") === 0) {
     const id = ref.slice(2);
+    const dirReel = "https://www.facebook.com/reel/" + id;
     const intentos = [
-      "https://www.facebook.com/reel/" + encodeURIComponent(id),
+      dirReel,
+      // EL TESTIGO: el reproductor público de incrustar. Es el que usan
+      // las webs para meter vídeos de Facebook SIN sesión; si él trae el
+      // MP4, el reel se puede abrir aunque la página normal venga vacía.
+      "https://www.facebook.com/plugins/video.php?href=" +
+        encodeURIComponent(dirReel + "/") + "&show_text=false",
+      "https://www.facebook.com/video/embed?video_id=" + encodeURIComponent(id),
       "https://www.facebook.com/video/video.php?v=" + encodeURIComponent(id),
       "https://www.facebook.com/watch/?v=" + encodeURIComponent(id),
       "https://m.facebook.com/reel/" + encodeURIComponent(id),
@@ -964,8 +986,10 @@ export async function resolve(ref, options) {
         const texto = pelarTahoe(intentos[i], ab.r.text());
         try { s = streamDeHtml(texto, id); } catch (e) { s = null; }
         // La página abrió pero vino VACÍA: la caza mayor en la misma
-        // dirección, con todas las caras desde abajo.
-        if (!s && !marcaVideo(pelarTahoe(intentos[i], ab.r.text())) && Date.now() - inicio < 8000) {
+        // dirección, con todas las caras desde abajo. Solo en los tres
+        // primeros peldaños (reel, testigo, embed), que son los que más
+        // video traen — el resto de intentos es repetición.
+        if (!s && i <= 2 && !marcaVideo(pelarTahoe(intentos[i], ab.r.text())) && Date.now() - inicio < 8000) {
           const tra = [];
           const caza = await cazarConVideo(intentos[i], 1800000, 7000, tra);
           trazaIntentos.push("caza(" + tra.join(",") + ")");
@@ -1023,6 +1047,25 @@ async function informarEnVivo(url) {
     paso = paso + " ‖ REEL directo: " + (caza.ok
       ? caza.cara + " · " + caza.texto.length + " car · vídeo SÍ"
       : tra.join(","));
+  }
+  // EL TESTIGO: el reproductor de incrustar contesta sin pedir sesión.
+  // Si la página normal vino vacía, él es la pregunta clave — si el
+  // testigo tampoco trae MP4, Facebook solo lo entrega con sesión.
+  if (idReel && Date.now() - t0 < 8000) {
+    try {
+      const t = await abrirFacebook(
+        "https://www.facebook.com/plugins/video.php?href=" +
+          encodeURIComponent("https://www.facebook.com/reel/" + encodeURIComponent(idReel) + "/") +
+          "&show_text=false", 600000, 6000, true, true);
+      if (t.r) {
+        const th = t.r.text();
+        paso = paso + " ‖ TESTIGO: " + t.traza.join("→") + " · " + th.length +
+          " car · MP4: " + (marcaVideo(th) ? "sí" : "no") +
+          " · vídeos: " + videosDeHtml(th).length;
+      } else {
+        paso = paso + " ‖ TESTIGO: " + t.traza.join(",");
+      }
+    } catch (e) { paso = paso + " ‖ TESTIGO: x"; }
   }
   if (idReel && Date.now() - t0 < 11000) {
     try {

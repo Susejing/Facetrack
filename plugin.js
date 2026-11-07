@@ -16,16 +16,20 @@
 
 // FaceTrack 0.1.5 — Facebook en Kino: vídeos públicos, nada más.
 //
-// Novedades de la 0.1.5 (el cuarto informe dejó el diagnóstico fino:
-// «js: 0 · playable_url: no» — la página del reel viene SIN ningún MP4
-// en ningún escondite): llega EL TESTIGO, el reproductor público de
-// Facebook para incrustar vídeos en webs externas (plugins/video.php
-// y video/embed), que por diseño NO pide sesión. Al reproducir se
-// prueban esas dos direcciones tras la página del reel; el cazador
-// conoce sus enlaces clásicos (hd_src/sd_src), y el informe "debug"
-// interroga al testigo cuando la página del enlace viene vacía: su
-// respuesta dirá si el vídeo existe fuera del muro o si ya solo lo
-// entrega Facebook con sesión (→ entonces, ventanita v0.2).
+// Novedades de la 0.1.5 (la caza mayor): el cuarto informe clavó la
+// verdad — la cara que abre la puerta entrega la página del reel VACÍA
+// de vídeo (445 mil letras sin un solo enlace de MP4, cero bloques JS,
+// sin muro de sesión). Facebook reparte a veces la casa vacía según la
+// cara. LA CAZA MAYOR: cuando una página abre pero viene sin señal de
+// vídeo (marcaVideo: playable_url / browser_native / progressive por
+// cualquier rincón), se sube la escalera DESDE ABAJO — navegador,
+// galletas, simple, móviles — y solo se acepta la cara que entregue la
+// página CON vídeo; la cara ganadora queda recordada. La usan la
+// búsqueda (en la dirección final del enlace) y el reproductor (en cada
+// dirección de vídeo). Y el detective 2.0: el informe "debug" ahora
+// prueba en vivo el enlace, el REEL DIRECTO con todas las caras y la
+// puerta trasera TAHOE — una sola captura dice qué cara (si alguna)
+// trae el vídeo.
 //
 // Novedades de la 0.1.4 (el tercer informe: la puerta se abre pero la
 // casa viene vacía): la escalera funcionó y la página del reel bajó
@@ -192,6 +196,61 @@ async function abrirFacebook(url, tope, tiempoMs, sinMovil, reiniciar) {
   return { r: null, traza: traza };
 }
 
+// ¿El HTML crudo trae señal de vídeo? (algún enlace de MP4 por cualquier
+// rincón: playable_url, browser_native, progressive)
+function marcaVideo(html) {
+  return typeof html === "string" && (
+    html.indexOf("playable_url") >= 0 ||
+    html.indexOf("browser_native_hd_url") >= 0 ||
+    html.indexOf("browser_native_sd_url") >= 0 ||
+    html.indexOf("progressive_url") >= 0);
+}
+
+// LA CAZA MAYOR: sube la escalera DESDE ABAJO (navegador, galletas,
+// simple, móviles) y solo acepta una página que traiga señal de vídeo —
+// una cara puede abrir la puerta y entregar la casa VACÍA; la caza sigue
+// subiendo hasta la cara que entregue la casa buena. La cara que gana
+// queda recordada (fbVia) para las siguientes. Devuelve
+// { ok, cara, texto, traza }: ok=false si ninguna cara trajo vídeo.
+async function cazarConVideo(url, tope, tiempoMs, traza) {
+  const todas = [
+    { nombre: "navegador", enc: true, calentar: false, movil: false },
+    { nombre: "galletas", enc: true, calentar: true, movil: false },
+    { nombre: "simple", enc: false, calentar: false, movil: false },
+    { nombre: "m.navegador", enc: true, calentar: false, movil: true },
+    { nombre: "m.simple", enc: false, calentar: false, movil: true }
+  ];
+  for (let i = 0; i < todas.length; i++) {
+    const v = todas[i];
+    const destino = v.movil ? versionMovil(url) : url;
+    try {
+      if (v.calentar) {
+        try { await pedirSimple("https://www.facebook.com/", 20000, 5000, true); } catch (e) { /* la que se pueda */ }
+      }
+      const r = await pedirSimple(destino, tope, tiempoMs, v.enc);
+      const texto = r.text();
+      traza.push(v.nombre + ":" + r.status);
+      if (r.ok && marcaVideo(texto)) {
+        try { kino.storage.set("fbVia", v.nombre); } catch (e) { /* sin almacén */ }
+        return { ok: true, cara: v.nombre, texto: texto, traza: traza };
+      }
+    } catch (e) {
+      const m = /HTTP (\d+)/.exec(String(e && e.message ? e.message : String(e)));
+      traza.push(v.nombre + ":" + (m ? m[1] : "x"));
+    }
+  }
+  return { ok: false, traza: traza };
+}
+
+// La puerta trasera tahoe contesta "for (;;);{...}": se pela el prefijo
+// y se viste de bloque data-sjs para que el cazador lo lea igual.
+function pelarTahoe(url, texto) {
+  if (String(url).indexOf("/tahoe/") < 0) return texto;
+  const pos = texto.indexOf("{");
+  if (pos > 0) return '<script type="application/json" data-sjs>' + texto.slice(pos) + "</script>";
+  return texto;
+}
+
 // Quita el escape de un pedazo de cadena tal como viene en el JSON
 // (https:\/\/, \u0025...). Si no se puede, al menos se desenreda lo común.
 function soltar(s) {
@@ -284,10 +343,8 @@ function esVideo(n) {
   if (n.__typename === "Video") return true;
   // Algunas páginas traen el vídeo sin la etiqueta, pero con enlaces.
   // LOS REELS llegan así y SIN id: el id lo lleva el nodo papá, y el
-  // caminador se lo presta — no se vuelve a exigir aquí. hd_src/sd_src
-  // son los enlaces del reproductor público de incrustar (plugins).
-  if (n.browser_native_hd_url || n.browser_native_sd_url || n.playable_url ||
-      n.progressive_urls || n.hd_src || n.sd_src) return true;
+  // caminador se lo presta — no se vuelve a exigir aquí.
+  if (n.browser_native_hd_url || n.browser_native_sd_url || n.playable_url || n.progressive_urls) return true;
   return false;
 }
 
@@ -395,13 +452,13 @@ function urlsCrudas(html) {
       .replace(/\\\\u([0-9a-fA-F]{4})/g, function (m, h) { return String.fromCharCode(parseInt(h, 16)); }));
   } catch (e) { /* se caza sobre el original */ }
   for (let c = 0; c < cazas.length; c++) {
-    const rx = /"(browser_native_hd_url|browser_native_sd_url|playable_url_quality_hd|playable_url|hd_src|sd_src)":"((?:[^"\\]|\\.)*)"/g;
+    const rx = /"(browser_native_hd_url|browser_native_sd_url|playable_url_quality_hd|playable_url)":"((?:[^"\\]|\\.)*)"/g;
     let m;
     while ((m = rx.exec(cazas[c])) !== null) {
       const u = soltar(m[2]);
       if (!u || u.indexOf("http") !== 0) continue;
       if (/\.mpd(\?|$)/i.test(u) || /\.m3u8(\?|$)/i.test(u)) continue;
-      if (m[1] === "browser_native_hd_url" || m[1] === "playable_url_quality_hd" || m[1] === "hd_src") {
+      if (m[1] === "browser_native_hd_url" || m[1] === "playable_url_quality_hd") {
         if (!fuera.hd) fuera.hd = u;
       } else {
         if (!fuera.sd) fuera.sd = u;
@@ -421,8 +478,8 @@ function urlsDeVideo(v) {
     if (legado && typeof legado[k] === "string" && legado[k]) return legado[k];
     return "";
   };
-  let hd = campo("browser_native_hd_url") || campo("playable_url_quality_hd") || campo("hd_src");
-  let sd = campo("browser_native_sd_url") || campo("playable_url") || campo("sd_src");
+  let hd = campo("browser_native_hd_url") || campo("playable_url_quality_hd");
+  let sd = campo("browser_native_sd_url") || campo("playable_url");
   const frag = v.videoDeliveryResponseFragment && v.videoDeliveryResponseFragment.videoDeliveryResponseResult;
   const prog = frag && Array.isArray(frag.progressive_urls) ? frag.progressive_urls : [];
   for (let i = 0; i < prog.length; i++) {
@@ -574,6 +631,7 @@ function pintaMuro(html) {
 // El ítem de un enlace pegado: se abre la página y se lee su vídeo.
 async function itemDeEnlace(url) {
   trazaBusqueda = "enlace pegado: " + url.slice(0, 80);
+  const t0 = Date.now();
   // El enlace se guarda ANTES de abrirlo: aunque falle, el informe
   // "debug" lo tiene para su prueba en vivo.
   try { kino.storage.set("fbUltimo", url); } catch (e) { /* sin almacén */ }
@@ -584,11 +642,24 @@ async function itemDeEnlace(url) {
       userMessage: "Facebook no dejó abrir ese enlace desde la app. Prueba de nuevo en un rato; escribiendo debug sale el informe."
     });
   }
-  const html = ab.r.text();
-  const videos = videosDeHtml(html);
-  const posterOg = metaOg(html, "og:image");
+  let html = ab.r.text();
+  let videos = videosDeHtml(html);
+  let posterOg = metaOg(html, "og:image");
   trazaBusqueda = "enlace: escalera " + ab.traza.join(" → ") + " · " + html.length +
     " caracteres · " + videos.length + " vídeo(s) · muro: " + (pintaMuro(html) ? "sí" : "no");
+  // La página abrió pero vino VACÍA de vídeo (el caso del reel): la caza
+  // mayor en la dirección final, con todas las caras desde abajo.
+  const idFinal0 = idDeUrl(ab.r.url || url);
+  if (videos.length === 0 && idFinal0 && Date.now() - t0 < 9000) {
+    const tra = [];
+    const caza = await cazarConVideo("https://www.facebook.com/reel/" + encodeURIComponent(idFinal0), 1200000, 7000, tra);
+    trazaBusqueda = trazaBusqueda + " ‖ caza: " + (caza.ok ? caza.cara + " trajo el vídeo" : tra.join(","));
+    if (caza.ok) {
+      html = caza.texto;
+      videos = videosDeHtml(html);
+      posterOg = posterOg || metaOg(html, "og:image");
+    }
+  }
   if (videos.length > 0) {
     const it = itemDeVideo(videos[0], "", posterOg);
     if (it) return [it];
@@ -870,12 +941,8 @@ export async function resolve(ref, options) {
   // los MP4 firmados (caducan: por eso se resuelve al reproducir).
   if (ref.indexOf("v:") === 0) {
     const id = ref.slice(2);
-    const dirReel = "https://www.facebook.com/reel/" + encodeURIComponent(id);
     const intentos = [
-      dirReel,
-      // El testigo: el reproductor público de incrustar, que no pide sesión.
-      "https://www.facebook.com/plugins/video.php?href=" + encodeURIComponent(dirReel + "/") + "&show_text=false",
-      "https://www.facebook.com/video/embed?video_id=" + encodeURIComponent(id),
+      "https://www.facebook.com/reel/" + encodeURIComponent(id),
       "https://www.facebook.com/video/video.php?v=" + encodeURIComponent(id),
       "https://www.facebook.com/watch/?v=" + encodeURIComponent(id),
       "https://m.facebook.com/reel/" + encodeURIComponent(id),
@@ -892,24 +959,20 @@ export async function resolve(ref, options) {
       if (i > 0 && Date.now() - inicio > 12000) break;
       const ab = await abrirFacebook(intentos[i], 1800000, 9000, true);
       trazaIntentos.push(ab.r ? ab.traza.join(",") : "(" + ab.traza.join(",") + ")");
-      if (!ab.r) continue;
-      let texto = ab.r.text();
-      // La puerta trasera contesta "for (;;);{...}": se pela el prefijo
-      // y se viste de bloque data-sjs para que el cazador lo lea igual.
-      const esTahoe = intentos[i].indexOf("/tahoe/") >= 0;
-      if (esTahoe) {
-        const pos = texto.indexOf("{");
-        if (pos > 0) texto = '<script type="application/json" data-sjs>' + texto.slice(pos) + "</script>";
-      }
       let s = null;
-      try { s = streamDeHtml(texto, id); } catch (e) { s = null; }
-      // La página abrió pero vino VACÍA (la cara recordada entrega a veces
-      // una versión sin vídeo): una vuelta más por la escalera desde abajo.
-      if (!s && i <= 1 && Date.now() - inicio < 8000) {
-        const ab2 = await abrirFacebook(intentos[i], 1800000, 9000, true, true);
-        if (ab2.r) {
-          trazaIntentos.push("vuelta:" + ab2.traza.join(","));
-          try { s = streamDeHtml(ab2.r.text(), id); } catch (e2) { s = null; }
+      if (ab.r) {
+        const texto = pelarTahoe(intentos[i], ab.r.text());
+        try { s = streamDeHtml(texto, id); } catch (e) { s = null; }
+        // La página abrió pero vino VACÍA: la caza mayor en la misma
+        // dirección, con todas las caras desde abajo.
+        if (!s && !marcaVideo(pelarTahoe(intentos[i], ab.r.text())) && Date.now() - inicio < 8000) {
+          const tra = [];
+          const caza = await cazarConVideo(intentos[i], 1800000, 7000, tra);
+          trazaIntentos.push("caza(" + tra.join(",") + ")");
+          if (caza.ok) {
+            const texto2 = pelarTahoe(intentos[i], caza.texto);
+            try { s = streamDeHtml(texto2, id); } catch (e2) { s = null; }
+          }
         }
       }
       if (s) {
@@ -942,46 +1005,38 @@ export async function settingsStatus() {
 // qué le respondió Facebook — el informe que dice la verdad del teléfono.
 async function informarEnVivo(url) {
   if (!url) return "EN VIVO: sin enlace previo (pega un enlace y vuelve a escribir debug)";
-  let paso = "EN VIVO " + url.slice(0, 60) + " → ";
-  const ab = await abrirFacebook(url, 1200000, 9000, false);
-  if (!ab.r) return paso + "NINGUNA CARA PASÓ: " + ab.traza.join(", ");
+  const t0 = Date.now();
+  const ab = await abrirFacebook(url, 1200000, 7000, false);
+  if (!ab.r) return "EN VIVO " + url.slice(0, 50) + " → NINGUNA CARA: " + ab.traza.join(",");
   const html = ab.r.text();
-  const videos = videosDeHtml(html);
-  paso = paso + "escalera " + ab.traza.join(" → ") + " · " + html.length + " caracteres" +
-    " · final: " + String(ab.r.url || url).slice(0, 55) +
-    " · data-sjs: " + bloquesSjs(html).length +
-    " · js: " + bloquesJs(html).length +
-    " · playable_url: " + (html.indexOf("playable_url") >= 0 ? "sí" : "no") +
-    " · vídeos: " + videos.length +
-    " · muro: " + (pintaMuro(html) ? "SÍ" : "no");
-  if (videos.length > 0) {
-    const u = urlsDeVideo(videos[0]);
-    const propia = String(videos[0].id || videos[0].videoId || "");
-    return paso + " · id " + (propia || String(videos[0].__id || "-") + " (prestada)") +
-      " · HD: " + (u.hd ? "sí" : "no") + " · SD: " + (u.sd ? "sí" : "no");
+  const final = String(ab.r.url || url);
+  const idReel = idDeUrl(final);
+  let paso = "EN VIVO " + ab.traza.join("→") + " · " + html.length + " car · vídeo en crudo: " +
+    (marcaVideo(html) ? "sí" : "no") + " · vídeos: " + videosDeHtml(html).length +
+    " · muro: " + (pintaMuro(html) ? "SÍ" : "no") + " · id: " + (idReel || "no");
+  // El detective 2.0: si la página no trae vídeo, prueba el REEL DIRECTO
+  // con todas las caras desde abajo y la PUERTA TRASERA tahoe. La captura
+  // de este informe dice exactamente qué cara (si alguna) trae el vídeo.
+  if (!marcaVideo(html) && idReel && Date.now() - t0 < 5000) {
+    const tra = [];
+    const caza = await cazarConVideo("https://www.facebook.com/reel/" + encodeURIComponent(idReel), 1200000, 7000, tra);
+    paso = paso + " ‖ REEL directo: " + (caza.ok
+      ? caza.cara + " · " + caza.texto.length + " car · vídeo SÍ"
+      : tra.join(","));
   }
-  const og = metaOg(html, "og:video:secure_url") || metaOg(html, "og:video:url") || metaOg(html, "og:video");
-  const idFin = idDeUrl(ab.r.url || url);
-  const cola = " · og:video: " + (og ? "sí" : "no") + " · id final: " + (idFin || "no");
-  // EL TESTIGO: si la página vino vacía y hay id, se interroga al
-  // reproductor público de Facebook (el de incrustar en webs, que no
-  // pide sesión): su respuesta dice si el vídeo existe fuera del muro.
-  if (videos.length === 0 && !og && idFin) {
+  if (idReel && Date.now() - t0 < 11000) {
     try {
-      const t = await abrirFacebook(
-        "https://www.facebook.com/plugins/video.php?href=" +
-        encodeURIComponent("https://www.facebook.com/reel/" + idFin + "/"),
-        600000, 6000, true, true);
-      if (!t.r) return paso + cola + " · testigo: NINGUNA CARA (" + t.traza.join(",") + ")";
-      const th = t.r.text();
-      const tv = videosDeHtml(th);
-      const tieneMp4 = th.indexOf("playable_url") >= 0 || th.indexOf("hd_src") >= 0 ||
-        th.indexOf("browser_native") >= 0;
-      return paso + cola + " · testigo: " + t.traza.join("→") + " · " + th.length +
-        " caracteres · MP4: " + (tieneMp4 ? "sí" : "no") + " · vídeos: " + tv.length;
-    } catch (e) { /* al informe sin testigo */ }
+      const rT = await pedirSimple(
+        "https://www.facebook.com/video/tahoe/async/" + encodeURIComponent(idReel) +
+        "/?chain=true&isvideo=true&payloadtype=primary", 800000, 6000, false);
+      const tT = rT.text();
+      paso = paso + " ‖ TAHOE: " + tT.length + " car · vídeo: " + (marcaVideo(tT) ? "SÍ" : "no");
+    } catch (e) {
+      const m = /HTTP (\d+)/.exec(String(e && e.message ? e.message : String(e)));
+      paso = paso + " ‖ TAHOE: " + (m ? m[1] : "x");
+    }
   }
-  return paso + cola;
+  return paso;
 }
 
 async function informeDebug() {

@@ -14,6 +14,23 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+// FaceTrack 0.2.4 — la puerta interna.
+//
+// La prueba del teléfono con la 0.2.3 contó la verdad completa (7 nov):
+// las puertas de búsqueda —www, Watch, móvil— entregan un CASCARÓN sin
+// un solo vídeo ni página nombrada (V:0, págs:0). Los resultados de
+// búsqueda de Facebook se cargan por su puerta interna, GraphQL, que
+// solo habla con JavaScript. PERO ese cascarón trae las LLAVES de esa
+// puerta: el token fb_dtsg, el lsd y (a veces) el doc_id de las
+// consultas. Esta versión las caza del cascarón y hace el POST a
+// /api/graphql/ con las galletas de la sesión — la única puerta que
+// puede traer resultados de verdad. El informe «debug» cuenta las
+// llaves encontradas (dtsg/lsd/doc) y qué le respondió el POST; si el
+// doc_id no es el de búsqueda o el formato cambió, quedan el respaldo
+// de páginas y las puertas de siempre, y con esa captura se decide si
+// la búsqueda por palabras es posible o se declara imposible con
+// honestidad.
+
 // FaceTrack 0.2.3 — el cascarón y el respaldo de páginas.
 //
 // El interrogatorio de la 0.2.2 contó la verdad del teléfono (7 nov):
@@ -197,7 +214,7 @@
 // como "facebookexternalhit/1.1" (el rastreador de vistas previas del
 // propio Facebook), que no está limitado.
 
-const VERSION = "0.2.3";
+const VERSION = "0.2.4";
 
 // La cara con la que se piden las páginas (un Chrome de escritorio).
 const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -943,42 +960,159 @@ async function itemsDeParaTi(limite) {
 
 // ---------- búsqueda real y páginas seguidas (con sesión) ----------
 
-// Con sesión, la búsqueda de Facebook... EL CASCARÓN Y EL RESPALDO:
-// las puertas de búsqueda de www entregan un cascarón sin vídeos (los
-// resultados se cargan por la puerta interna), pero en el cascarón
-// Facebook nombra las páginas que coinciden. Se prueban primero las
-// puertas nuevas (Watch y la móvil) y, si ninguna trae vídeos, se va
-// directo a por los vídeos de la primera página nombrada. Cada puerta
-// deja su parte en la traza — cara, letras, JSON, muro, MP4, vídeos,
-// nodos V crudos y páginas halladas — para el informe "debug".
+// Las LLAVES de la puerta interna, cazadas del cascarón: el token
+// fb_dtsg, el lsd y los doc_id de las consultas que la página trae
+// embebidos.
+function tokensDe(plano) {
+  const fuera = { dtsg: "", lsd: "", docs: [] };
+  let m = /"DTSGInitialToken",\[\],\{"token":"([^"]{5,200})"/.exec(plano) ||
+    /name="fb_dtsg"\s+value="([^"]{5,200})"/.exec(plano) ||
+    /"fb_dtsg":"([^"]{5,200})"/.exec(plano);
+  if (m) fuera.dtsg = m[1];
+  m = /"LSD",\[\],\{"token":"([^"]{5,60})"/.exec(plano) ||
+    /name="lsd"\s+value="([^"]{5,60})"/.exec(plano) ||
+    /"lsd":"([^"]{5,60})"/.exec(plano);
+  if (m) fuera.lsd = m[1];
+  const vistos = {};
+  const rxD = /"doc_id":"(\d{8,25})"/g;
+  let mm;
+  while ((mm = rxD.exec(plano)) !== null) {
+    if (!vistos[mm[1]]) { vistos[mm[1]] = true; fuera.docs.push(mm[1]); }
+  }
+  return fuera;
+}
+
+// La respuesta de GraphQL es JSON (a veces con el prefijo "for (;;);"):
+// se pela, se camina igual que un bloque de página y salen los vídeos.
+function nodosDeTexto(texto) {
+  let t = String(texto || "");
+  const pos = t.indexOf("{");
+  if (pos > 0) t = t.slice(pos);
+  let obj = null;
+  try { obj = JSON.parse(t); } catch (e) { return []; }
+  const nodos = [];
+  const cuenta = { n: 0 };
+  caminar(obj, nodos, cuenta, 0, "");
+  const porId = {};
+  const orden = [];
+  for (let i = 0; i < nodos.length; i++) {
+    let id = String(nodos[i].id || nodos[i].videoId || nodos[i].__id || "");
+    const u = urlsDeVideo(nodos[i]);
+    if (!id) { const base = u.hd || u.sd || ""; id = base ? "fb" + hashDe(base).slice(0, 12) : ""; }
+    if (!id) continue;
+    if (!porId[id]) { porId[id] = { nodo: nodos[i], urls: u }; orden.push(id); }
+  }
+  const fuera = [];
+  for (let j = 0; j < orden.length; j++) {
+    const e = porId[orden[j]];
+    e.nodo.__id = orden[j];
+    fuera.push(e.nodo);
+  }
+  return fuera;
+}
+
+// LA PUERTA INTERNA: el POST a /api/graphql/ con las llaves del cascarón
+// y las galletas de la sesión. Si Facebook acepta, la respuesta trae
+// los resultados de verdad.
+async function pedirGraphQL(q, docId, dtsg, lsd, vertical) {
+  const gal = galletasSesion();
+  const mc = /c_user=(\d+)/.exec(gal);
+  const av = mc ? mc[1] : "";
+  const variables = JSON.stringify({
+    params: {
+      serialized: "query:{" + q + "}|search_vertical:" + (vertical || ""),
+      has_chrono_list: true, has_chrono_list_sorted: false, has_chrono_list_reverse: false,
+      has_keyword: false, has_local_content: false, is_awaiting_vertical: false,
+      is_awaiting_local_content: false, is_location_search: false, is_esh_filtered_search: false,
+      query_source: null, scope: null, vertical: null
+    },
+    searchVertical: vertical || null,
+    cursor: null,
+    resultsIDS: []
+  });
+  const formulario = {
+    av: av, __user: av, __a: "1", __comet_req: "7",
+    fb_api_caller_class: "RelayModern",
+    fb_api_req_friendly_name: "CometSearchRootContentContainerQuery",
+    variables: variables,
+    doc_id: String(docId),
+    server_timestamps: "true",
+    fb_dtsg: dtsg
+  };
+  if (lsd) formulario.lsd = lsd;
+  const opciones = {
+    method: "POST",
+    headers: { "User-Agent": UA_PAGINA, "Content-Type": "application/x-www-form-urlencoded" },
+    body: { form: formulario },
+    timeoutMs: 4500,
+    maxBytes: 1500000
+  };
+  if (gal) opciones.headers["Cookie"] = gal;
+  try {
+    const r = await kino.fetch("https://www.facebook.com/api/graphql/", opciones);
+    if (!r.ok) return { nodos: [], parte: "graphql(doc:…" + String(docId).slice(-6) + ") HTTP " + r.status };
+    const t = r.text();
+    const nodos = nodosDeTexto(t);
+    return { nodos: nodos, parte: "graphql(doc:…" + String(docId).slice(-6) + ") · " + t.length + " car · vídeos:" + nodos.length };
+  } catch (e) {
+    const m = /HTTP (\d+)/.exec(String(e && e.message ? e.message : String(e)));
+    return { nodos: [], parte: "graphql(doc:…" + String(docId).slice(-6) + ") ✗ " + (m ? m[1] : "x") };
+  }
+}
+
+// Con sesión, la búsqueda de Facebook... LA PUERTA INTERNA: los
+// resultados se cargan por GraphQL, no en el HTML — las puertas
+// entregan un cascarón (V:0, págs:0, contado en el teléfono). Pero el
+// cascarón trae las LLAVES de la puerta interna: esta versión las caza
+// y hace el POST con las galletas. Si no abre, quedan las puertas de
+// Watch y móvil y el respaldo de páginas (los «username» del cascarón
+// y el nombre de la búsqueda sin espacios).
 async function itemsDeBusquedaReal(q, limite) {
   let nodos = [];
-  const puertas = [
-    { nombre: "watch", url: "https://www.facebook.com/watch/search/?q=" + encodeURIComponent(q) },
-    { nombre: "m.general", url: "https://m.facebook.com/search/top?q=" + encodeURIComponent(q) },
-    { nombre: "m.vídeos", url: "https://m.facebook.com/search/videos/?q=" + encodeURIComponent(q) },
-    { nombre: "www.general", url: "https://www.facebook.com/search/top?q=" + encodeURIComponent(q) },
-    { nombre: "www.vídeos", url: "https://www.facebook.com/search/videos/?q=" + encodeURIComponent(q) }
-  ];
   const inicio = Date.now();
   const partes = [];
   const candidatos = {};
+  // 1. EL CASCARÓN: sus llaves y las páginas que nombre.
+  let tokens = null;
+  {
+    const ab = await abrirFacebook("https://www.facebook.com/search/top?q=" + encodeURIComponent(q), 1200000, 5000, false, true);
+    if (ab.r) {
+      const html = ab.r.text();
+      const plano = html.split('\\"').join('"');
+      const rxU = /"username":"([A-Za-z0-9.\-_]{2,60})"/g;
+      let mu;
+      while ((mu = rxU.exec(plano)) !== null) { if (!candidatos[mu[1]]) candidatos[mu[1]] = true; }
+      tokens = tokensDe(plano);
+      partes.push("www " + ab.traza.join("→") + " · " + html.length + " car · dtsg:" + (tokens.dtsg ? "sí" : "no") +
+        " · lsd:" + (tokens.lsd ? "sí" : "no") + " · doc:" + tokens.docs.length +
+        " · vídeos:" + videosDeHtml(html).length);
+    } else {
+      partes.push("www ✗ " + ab.traza.join(","));
+    }
+  }
+  // 2. LA PUERTA INTERNA: el POST con las llaves (hasta dos doc_id).
+  if (tokens && tokens.dtsg && tokens.docs.length > 0) {
+    const cuantos = Math.min(tokens.docs.length, 2);
+    for (let g = 0; g < cuantos && nodos.length === 0; g++) {
+      if (Date.now() - inicio > 9500) break;
+      const gr = await pedirGraphQL(q, tokens.docs[g], tokens.dtsg, tokens.lsd, g === 0 ? "videos" : "");
+      partes.push(gr.parte);
+      if (gr.nodos.length > 0) nodos = gr.nodos;
+    }
+  } else if (tokens && !tokens.dtsg) {
+    partes.push("graphql: sin llaves en el cascarón");
+  }
+  // 3. Las otras puertas (Watch y móvil), por si alguna aún responde.
+  const puertas = [
+    { nombre: "watch", url: "https://www.facebook.com/watch/search/?q=" + encodeURIComponent(q) },
+    { nombre: "m.general", url: "https://m.facebook.com/search/top?q=" + encodeURIComponent(q) }
+  ];
   for (let i = 0; i < puertas.length && nodos.length === 0; i++) {
-    if (i > 0 && Date.now() - inicio > 8000) break;
-    const ab = await abrirFacebook(puertas[i].url, 1200000, 5000, false, i === 0);
-    if (!ab.r) { partes.push(puertas[i].nombre + " ✗ " + ab.traza.join(",")); continue; }
-    const html = ab.r.text();
-    const n = videosDeHtml(html);
-    const plano = html.split('\\"').join('"');
-    const rxU = /"username":"([A-Za-z0-9.\-_]{2,60})"/g;
-    let mu;
-    while ((mu = rxU.exec(plano)) !== null) { if (!candidatos[mu[1]]) candidatos[mu[1]] = true; }
-    partes.push(puertas[i].nombre + " " + ab.traza.join("→") + " · " + html.length + " car · json:" +
-      (html.match(/data-sjs/g) || []).length + " · muro:" + (pintaMuro(html) ? "SÍ" : "no") +
-      " · MP4:" + (marcaVideo(html) ? "sí" : "no") + " · vídeos:" + n.length +
-      " · V:" + Math.max((html.match(/"__typename":"Video"/g) || []).length,
-        (plano.match(/"__typename":"Video"/g) || []).length) +
-      " · págs:" + Object.keys(candidatos).length);
+    if (Date.now() - inicio > 9500) break;
+    const ab = await abrirFacebook(puertas[i].url, 1200000, 4000, false, false);
+    if (!ab.r) { partes.push(puertas[i].nombre + " ✗"); continue; }
+    const n = videosDeHtml(ab.r.text());
+    partes.push(puertas[i].nombre + " · vídeos:" + n.length);
     if (n.length > 0) nodos = n;
   }
   let items = [];
@@ -986,14 +1120,18 @@ async function itemsDeBusquedaReal(q, limite) {
     const it = itemDeVideo(nodos[i], "", "");
     if (it) items.push(it);
   }
-  // EL RESPALDO: ninguna puerta trajo vídeos, pero el cascarón nombra
-  // páginas que casan con la búsqueda — se abre la primera y sus vídeos
-  // SON la respuesta. (Los vídeos de una página sí vienen renderizados.)
+  // EL RESPALDO: las páginas que nombró el cascarón (y el nombre de la
+  // búsqueda sin espacios, por si es una página): sus vídeos sí vienen
+  // renderizados en el HTML. (Si la rama de páginas ya probó ese nombre,
+  // no se repite.)
   if (items.length === 0) {
     const nombres = Object.keys(candidatos);
-    for (let c = 0; c < nombres.length && c < 2 && Date.now() - inicio < 10000; c++) {
+    const sinEspacios = q.replace(/ /g, "");
+    if (sinEspacios && !candidatos[sinEspacios] && /^[A-Za-z0-9.\-_]{2,60}$/.test(sinEspacios)) nombres.push(sinEspacios);
+    for (let c = 0; c < nombres.length && c < 2 && Date.now() - inicio < 11500; c++) {
       const slug = slugDe(nombres[c]);
       if (!slug) continue;
+      if (slug === q && trazaBusqueda.indexOf("página: ") === 0) continue;
       const ab = await abrirFacebook("https://www.facebook.com/" + slug + "/videos/", 1200000, 5000, false);
       if (!ab.r) continue;
       const n2 = videosDeHtml(ab.r.text());
@@ -1421,28 +1559,29 @@ async function informarBusquedaViva() {
   let q = "";
   try { q = String(kino.storage.get("fbQ") || ""); } catch (e) { q = ""; }
   if (!q) return "BÚSQUEDA EN VIVO: sin búsqueda previa";
-  const puertas = [
-    ["watch", "https://www.facebook.com/watch/search/?q=" + encodeURIComponent(q)],
-    ["m.general", "https://m.facebook.com/search/top?q=" + encodeURIComponent(q)]
-  ];
   const partes = [];
-  for (let i = 0; i < puertas.length; i++) {
-    const ab = await abrirFacebook(puertas[i][1], 1200000, 6000, false, true);
-    if (!ab.r) { partes.push(puertas[i][0] + " ✗ " + ab.traza.join(",")); continue; }
-    const html = ab.r.text();
-    const plano = html.split('\\"').join('"');
-    const rxU = /"username":"([A-Za-z0-9.\-_]{2,60})"/g;
-    const vistos = {};
-    let mu;
-    while ((mu = rxU.exec(plano)) !== null) { if (!vistos[mu[1]]) vistos[mu[1]] = true; }
-    partes.push(puertas[i][0] + " " + ab.traza.join("→") + " · " + html.length + " car · json:" +
-      (html.match(/data-sjs/g) || []).length + " · muro:" + (pintaMuro(html) ? "SÍ" : "no") +
-      " · MP4:" + (marcaVideo(html) ? "sí" : "no") + " · vídeos:" + videosDeHtml(html).length +
-      " · V:" + Math.max((html.match(/"__typename":"Video"/g) || []).length,
-        (plano.match(/"__typename":"Video"/g) || []).length) +
-      " · págs:" + Object.keys(vistos).length);
+  const ab = await abrirFacebook("https://www.facebook.com/search/top?q=" + encodeURIComponent(q), 1200000, 6000, false, true);
+  if (!ab.r) return ("BÚSQUEDA EN VIVO «" + q.slice(0, 30) + "» ‖ www ✗ " + ab.traza.join(",")).slice(0, 380);
+  const html = ab.r.text();
+  const plano = html.split('\\"').join('"');
+  const tokens = tokensDe(plano);
+  const vistos = {};
+  const rxU = /"username":"([A-Za-z0-9.\-_]{2,60})"/g;
+  let mu;
+  while ((mu = rxU.exec(plano)) !== null) { if (!vistos[mu[1]]) vistos[mu[1]] = true; }
+  partes.push("www " + ab.traza.join("→") + " · " + html.length + " car · json:" +
+    (html.match(/data-sjs/g) || []).length + " · muro:" + (pintaMuro(html) ? "SÍ" : "no") +
+    " · vídeos:" + videosDeHtml(html).length +
+    " · V:" + Math.max((html.match(/"__typename":"Video"/g) || []).length,
+      (plano.match(/"__typename":"Video"/g) || []).length) +
+    " · págs:" + Object.keys(vistos).length +
+    " · dtsg:" + (tokens.dtsg ? "sí" : "no") + " · lsd:" + (tokens.lsd ? "sí" : "no") +
+    " · doc:" + tokens.docs.length);
+  if (tokens.dtsg && tokens.docs.length > 0) {
+    const gr = await pedirGraphQL(q, tokens.docs[0], tokens.dtsg, tokens.lsd, "videos");
+    partes.push(gr.parte);
   }
-  return ("BÚSQUEDA EN VIVO «" + q.slice(0, 30) + "» ‖ " + partes.join(" ‖ ")).slice(0, 300);
+  return ("BÚSQUEDA EN VIVO «" + q.slice(0, 30) + "» ‖ " + partes.join(" ‖ ")).slice(0, 380);
 }
 
 async function informeDebug() {

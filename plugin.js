@@ -14,6 +14,19 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+// FaceTrack 0.3.3 — watch primero.
+//
+// La captura del teléfono con la 0.3.2 (16:04) trajo por fin la caza
+// completa del riel: reels mudo en todas las caras (358 mil letras y
+// cero vídeos), y el que SIRVE el riel es la página de watch con cara
+// de navegador — «watch: nav:200/487k/V:8». Con el orden viejo
+// (reels primero) la caza gastaba intentos y hasta 7 segundos antes
+// de dar con el ganador; con watch primero se acaba en el primer
+// intento del común de las veces. Lo demás queda de respaldo por si
+// Facebook cambia de humor, y la línea «Riel Para ti» del informe
+// sigue contando cada intento (arreglada también la letra del código
+// HTTP en esa línea, que la 0.3.2 había dejado muda).
+
 // FaceTrack 0.3.2 — la caza del riel Para ti.
 //
 // La prueba del teléfono con la 0.3.1 (13:29) dejó por primera vez el
@@ -299,7 +312,7 @@
 // como "facebookexternalhit/1.1" (el rastreador de vistas previas del
 // propio Facebook), que no está limitado.
 
-const VERSION = "0.3.2";
+const VERSION = "0.3.3";
 
 // La cara con la que se piden las páginas (un Chrome de escritorio).
 const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -1148,26 +1161,25 @@ function paginasGuardadas() {
 
 // ---------- «Para ti»: el riel del algoritmo (con sesión) ----------
 
-// Los vídeos que el algoritmo de la cuenta trae: la página de reels,
-// la de watch y la portada (el feed de la cuenta también trae vídeos).
-// LA CAZA MAYOR DEL RIEL: la prueba del teléfono con la 0.3.1 (13:29)
-// contó que «parati» no se cae por tiempo — recorrió reels y watch y
-// ambas volvieron sin un solo vídeo — pero la 0.3.1 aceptaba la
-// PRIMERA cara que abriera la puerta, y esa cara entrega la página
-// vacía (el feed lo carga JavaScript en el navegador real). Aquí se
-// prueban TODAS las caras — www y móvil — y se acepta la primera que
-// traiga vídeos de verdad, con presupuesto corto para no gastar el
-// del buscador. Cada intento queda en la línea «Riel Para ti» del
-// informe: cara, estado, letras y vídeos (un * significa que la
-// página traía señal de vídeo que no se dejó leer). Con caché de
-// 15 min. El orden NO se toca: es el del riel.
+// Los vídeos que el algoritmo de la cuenta trae: la página de watch,
+// la de reels y la portada. EL ORDEN LO DECIDIÓ EL TELÉFONO: la
+// captura de la 0.3.2 (16:04) contó la caza completa — reels viene
+// mudo en todas las caras (358 mil letras y cero vídeos) y el que
+// SIRVE el riel es la página de watch con cara de navegador:
+// «watch: nav:200/487k/V:8». Así que watch va primero y la caza se
+// acaba en el primer intento del común de las veces (unos segundos);
+// lo demás queda de respaldo por si Facebook cambia de humor. Cada
+// intento sigue quedando en la línea «Riel Para ti» del informe (un *
+// significa que la página traía señal de vídeo que no se dejó leer).
+// Con caché de 15 min. El orden de los VÍDEOS no se toca: es el del
+// riel.
 async function videosParaTi() {
   const c = cachePag["*parati"];
   if (c && Date.now() - c.t < 900000) return c.nodos;
   let nodos = [];
   const urls = [
-    { nombre: "reels", url: "https://www.facebook.com/reels/" },
     { nombre: "watch", url: "https://www.facebook.com/watch/" },
+    { nombre: "reels", url: "https://www.facebook.com/reels/" },
     { nombre: "portada", url: "https://www.facebook.com/" }
   ];
   const caras = [
@@ -1192,7 +1204,7 @@ async function videosParaTi() {
         paso.push(caras[f].nombre + ":" + r.status + "/" + Math.round(texto.length / 1000) + "k/V:" + hallados.length + (marcaVideo(texto) ? "*" : ""));
         if (hallados.length > 0) nodos = hallados;
       } catch (e) {
-        const m = /HTTP (d+)/.exec(String(e && e.message ? e.message : String(e)));
+        const m = /HTTP (\d+)/.exec(String(e && e.message ? e.message : String(e)));
         paso.push(caras[f].nombre + ":" + (m ? m[1] : "x"));
       }
     }

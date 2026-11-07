@@ -14,6 +14,21 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+// FaceTrack 0.2.6 — las llaves donde sí hay sesión.
+//
+// La prueba del teléfono con la 0.2.5 (captura ~9:55) trajo dos
+// verdades: (1) la puerta de búsqueda www se cerró más (simple:404, y
+// el móvil contesta con un cascarón de 3.823 letras vacío); (2) la
+// portada se pidió heredando la cara MÓVIL que dejó la escalera de la
+// búsqueda — por eso dijo dtsg:no — y esa prueba no valió. Esta
+// versión busca las llaves donde sí hay sesión de verdad: la PORTADA,
+// la página del WATCH y la primera página guardada, todas SOLO por www
+// y con la cara de navegador primero, sin heredar caras m. que traen
+// cascarones vacíos. El POST a /api/graphql/ marca si la respuesta
+// trae errores (llaves buenas pero consulta equivocada) y el informe
+// «debug» cuenta cada fuente y qué respondió la puerta. Si ni así
+// abre, queda la decisión honesta.
+
 // FaceTrack 0.2.5 — las llaves con todos sus nombres.
 //
 // La prueba del teléfono con la 0.2.4 (captura ~9:43) contó la verdad:
@@ -228,7 +243,7 @@
 // como "facebookexternalhit/1.1" (el rastreador de vistas previas del
 // propio Facebook), que no está limitado.
 
-const VERSION = "0.2.5";
+const VERSION = "0.2.6";
 
 // La cara con la que se piden las páginas (un Chrome de escritorio).
 const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -1011,6 +1026,44 @@ function tokensDe(plano) {
   return fuera;
 }
 
+// Las llaves de una página que sí abre con sesión: SOLO por www y con
+// la cara de navegador primero (sin heredar caras m. que dejan
+// cascarones vacíos), y caza lo que traiga.
+async function llavesDe(url, tiempoMs) {
+  const ab = await abrirFacebook(url, 1200000, tiempoMs, true, true);
+  if (!ab.r) return { tokens: null, parte: "✗ " + ab.traza.join(",") };
+  const html = ab.r.text();
+  return { tokens: tokensDe(html.split('\\"').join('"')), parte: html.length + " car" };
+}
+
+// Busca las llaves donde sí hay sesión de verdad: la portada, la
+// página del watch y (si hay) la primera página guardada. Para cuando
+// el cascarón de búsqueda viene mudo. Devuelve las llaves completas
+// (o tan completas como se pudo) y deja en la traza lo que halló cada
+// fuente.
+async function completarLlaves(tokens, partes, presupuesto) {
+  if (!tokens) tokens = { dtsg: "", lsd: "", docs: [] };
+  const fuentes = [["portada", "https://www.facebook.com/"], ["watch", "https://www.facebook.com/watch/"]];
+  try {
+    const pgs = paginasGuardadas();
+    if (pgs.length > 0 && pgs[0].slug) {
+      fuentes.push(["página @" + pgs[0].slug, "https://www.facebook.com/" + pgs[0].slug + "/videos/"]);
+    }
+  } catch (e) { /* sin páginas guardadas */ }
+  for (let f = 0; f < fuentes.length; f++) {
+    if ((tokens.dtsg && tokens.docs.length > 0) || Date.now() > presupuesto) break;
+    const fr = await llavesDe(fuentes[f][1], 4000);
+    if (!fr.tokens) { partes.push(fuentes[f][0] + " " + fr.parte); continue; }
+    if (!tokens.dtsg) tokens.dtsg = fr.tokens.dtsg;
+    if (!tokens.lsd) tokens.lsd = fr.tokens.lsd;
+    for (let d = 0; d < fr.tokens.docs.length; d++) {
+      if (tokens.docs.indexOf(fr.tokens.docs[d]) < 0) tokens.docs.push(fr.tokens.docs[d]);
+    }
+    partes.push(fuentes[f][0] + " " + fr.parte + " · dtsg:" + (tokens.dtsg ? "sí" : "no") + " · doc:" + tokens.docs.length);
+  }
+  return tokens;
+}
+
 // La respuesta de GraphQL es JSON (a veces con el prefijo "for (;;);"):
 // se pela, se camina igual que un bloque de página y salen los vídeos.
 function nodosDeTexto(texto) {
@@ -1073,7 +1126,7 @@ async function pedirGraphQL(q, docId, dtsg, lsd, vertical) {
     method: "POST",
     headers: { "User-Agent": UA_PAGINA, "Content-Type": "application/x-www-form-urlencoded" },
     body: { form: formulario },
-    timeoutMs: 4500,
+    timeoutMs: 4000,
     maxBytes: 1500000
   };
   if (gal) opciones.headers["Cookie"] = gal;
@@ -1082,7 +1135,8 @@ async function pedirGraphQL(q, docId, dtsg, lsd, vertical) {
     if (!r.ok) return { nodos: [], parte: "graphql(doc:…" + String(docId).slice(-6) + ") HTTP " + r.status };
     const t = r.text();
     const nodos = nodosDeTexto(t);
-    return { nodos: nodos, parte: "graphql(doc:…" + String(docId).slice(-6) + ") · " + t.length + " car · vídeos:" + nodos.length };
+    const conErr = t.indexOf('"errors"') >= 0 || t.indexOf("debug_info") >= 0;
+    return { nodos: nodos, parte: "graphql(doc:…" + String(docId).slice(-6) + ") · " + t.length + " car · vídeos:" + nodos.length + (conErr ? " · CON ERRORES" : "") };
   } catch (e) {
     const m = /HTTP (\d+)/.exec(String(e && e.message ? e.message : String(e)));
     return { nodos: [], parte: "graphql(doc:…" + String(docId).slice(-6) + ") ✗ " + (m ? m[1] : "x") };
@@ -1119,22 +1173,11 @@ async function itemsDeBusquedaReal(q, limite) {
       partes.push("www ✗ " + ab.traza.join(","));
     }
   }
-  // 1b. Si el cascarón trajo las llaves incompletas, la PORTADA de
-  // Facebook las trae seguras (ahí vive el token con todos sus
-  // nombres y montones de consultas).
-  if (tokens && (!tokens.dtsg || tokens.docs.length === 0) && Date.now() - inicio < 6000) {
-    const ab2 = await abrirFacebook("https://www.facebook.com/", 1200000, 4500, false, false);
-    if (ab2.r) {
-      const tk2 = tokensDe(ab2.r.text().split('\\"').join('"'));
-      if (!tokens.dtsg) tokens.dtsg = tk2.dtsg;
-      if (!tokens.lsd) tokens.lsd = tk2.lsd;
-      for (let d = 0; d < tk2.docs.length; d++) {
-        if (tokens.docs.indexOf(tk2.docs[d]) < 0) tokens.docs.push(tk2.docs[d]);
-      }
-      partes.push("portada · dtsg:" + (tokens.dtsg ? "sí" : "no") + " · doc:" + tokens.docs.length);
-    } else {
-      partes.push("portada ✗");
-    }
+  // 1b. Si el cascarón trajo las llaves incompletas, se buscan donde sí
+  // hay sesión de verdad: la portada, el watch y (si hay) la primera
+  // página guardada — esas páginas sí se abren enteras.
+  if (!tokens || !tokens.dtsg || tokens.docs.length === 0) {
+    tokens = await completarLlaves(tokens, partes, inicio + 7500);
   }
   // 2. LA PUERTA INTERNA: el POST con las llaves (hasta dos doc_id).
   if (tokens && tokens.dtsg && tokens.docs.length > 0) {
@@ -1146,7 +1189,7 @@ async function itemsDeBusquedaReal(q, limite) {
       if (gr.nodos.length > 0) nodos = gr.nodos;
     }
   } else if (tokens) {
-    partes.push("graphql: sin llaves (cascarón ni portada)");
+    partes.push("graphql: sin llaves en ninguna fuente");
   }
   // 3. Las otras puertas (Watch y móvil), por si alguna aún responde.
   const puertas = [
@@ -1605,12 +1648,13 @@ async function informarBusquedaViva() {
   let q = "";
   try { q = String(kino.storage.get("fbQ") || ""); } catch (e) { q = ""; }
   if (!q) return "BÚSQUEDA EN VIVO: sin búsqueda previa";
+  const t0 = Date.now();
   const partes = [];
   const ab = await abrirFacebook("https://www.facebook.com/search/top?q=" + encodeURIComponent(q), 1200000, 5000, false, true);
   if (!ab.r) return ("BÚSQUEDA EN VIVO «" + q.slice(0, 30) + "» ‖ www ✗ " + ab.traza.join(",")).slice(0, 440);
   const html = ab.r.text();
   const plano = html.split('\\"').join('"');
-  const tokens = tokensDe(plano);
+  let tokens = tokensDe(plano);
   const vistos = {};
   const rxU = /"username":"([A-Za-z0-9.\-_]{2,60})"/g;
   let mu;
@@ -1623,20 +1667,10 @@ async function informarBusquedaViva() {
     " · págs:" + Object.keys(vistos).length +
     " · dtsg:" + (tokens.dtsg ? "sí" : "no") + " · lsd:" + (tokens.lsd ? "sí" : "no") +
     " · doc:" + tokens.docs.length);
-  // Si el cascarón quedó mudo, la PORTADA dice si las llaves viven allí.
+  // Si el cascarón quedó mudo, se buscan las llaves donde sí hay
+  // sesión de verdad (portada, watch, primera página guardada).
   if (!tokens.dtsg || tokens.docs.length === 0) {
-    const ab2 = await abrirFacebook("https://www.facebook.com/", 1200000, 4500, false, false);
-    if (ab2.r) {
-      const tk2 = tokensDe(ab2.r.text().split('\\"').join('"'));
-      if (!tokens.dtsg) tokens.dtsg = tk2.dtsg;
-      if (!tokens.lsd) tokens.lsd = tk2.lsd;
-      for (let d = 0; d < tk2.docs.length; d++) {
-        if (tokens.docs.indexOf(tk2.docs[d]) < 0) tokens.docs.push(tk2.docs[d]);
-      }
-      partes.push("portada · dtsg:" + (tokens.dtsg ? "sí" : "no") + " · doc:" + tokens.docs.length);
-    } else {
-      partes.push("portada ✗");
-    }
+    tokens = await completarLlaves(tokens, partes, t0 + 8000);
   }
   if (tokens.dtsg && tokens.docs.length > 0) {
     const gr = await pedirGraphQL(q, tokens.docs[0], tokens.dtsg, tokens.lsd, "videos");

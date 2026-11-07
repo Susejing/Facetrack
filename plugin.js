@@ -14,6 +14,26 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+// FaceTrack 0.3.2 — la caza del riel Para ti.
+//
+// La prueba del teléfono con la 0.3.1 (13:29) dejó por primera vez el
+// informe completo en la pantalla, y contó la verdad: «parati» NO se
+// cae por tiempo — recorrió reels y watch y ambas volvieron sin un
+// solo vídeo; la fila de la página guardada también vino vacía
+// (0/1), y hasta la página del último enlace (781 mil letras) llegó
+// sin vídeo adentro — solo el TESTIGO trajo MP4. PERO la 0.3.1 tenía
+// un hueco de diseño: el riel aceptaba la PRIMERA cara que abriera
+// la puerta, y esa cara entrega la página vacía (el feed real lo
+// carga JavaScript en el navegador). Esta versión sube la CAZA MAYOR
+// al riel: reels, watch y la portada se piden con TODAS las caras —
+// www y móvil — y se acepta la primera que traiga vídeos de verdad,
+// con presupuesto corto para no gastar el del buscador. Cada intento
+// queda en la línea «Riel Para ti» del informe (cara, estado, letras
+// y vídeos; un * significa que la página traía señal de vídeo que no
+// se dejó leer) y cada fila de página cuenta su propia caza en
+// «Último Inicio». La próxima captura decide con evidencia si algún
+// riel es posible o la puerta se cierra con honestidad.
+
 // FaceTrack 0.3.1 — el informe que se deja leer.
 //
 // La prueba del teléfono con la 0.3.0 (13:16) dejó dos verdades:
@@ -279,7 +299,7 @@
 // como "facebookexternalhit/1.1" (el rastreador de vistas previas del
 // propio Facebook), que no está limitado.
 
-const VERSION = "0.3.1";
+const VERSION = "0.3.2";
 
 // La cara con la que se piden las páginas (un Chrome de escritorio).
 const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -291,6 +311,8 @@ let trazaBusqueda = "";
 let trazaHome = "";
 let trazaResolve = "";
 let trazaError = "";
+let trazaPaginas = "";
+let trazaParati = "";
 
 // Caché de los vídeos de cada página pedida (30 min): el Inicio y el
 // "Ver más" de una misma fila no gastan dos descargas iguales.
@@ -1062,13 +1084,23 @@ async function videosDePagina(slug) {
     "https://www.facebook.com/" + slug + "/"
   ];
   const inicio = Date.now();
+  const visto = [];
   for (let i = 0; i < urls.length && nodos.length === 0; i++) {
     // El buscador tiene un presupuesto: si la primera dirección ya lo gastó,
     // no se espera a la segunda (mejor un aviso honesto que un timeout).
     if (i > 0 && Date.now() - inicio > 6000) break;
     const ab = await abrirFacebook(urls[i], 1200000, 9000, false);
-    if (ab.r) nodos = videosDeHtml(ab.r.text());
+    const etiqueta = i === 0 ? "videos" : "raíz";
+    if (ab.r) {
+      const texto = ab.r.text();
+      const hallados = videosDeHtml(texto);
+      visto.push(etiqueta + " " + ab.traza.join(",") + "/" + Math.round(texto.length / 1000) + "k/V:" + hallados.length);
+      if (hallados.length > 0) nodos = hallados;
+    } else {
+      visto.push(etiqueta + " ✗ " + ab.traza.join(","));
+    }
   }
+  trazaPaginas = (slug + ": " + visto.join(" ‖ ")).slice(0, 200);
   // Los más nuevos primero cuando se sabe cuándo se publicaron.
   nodos.sort(function (a, b) {
     const ta = typeof a.creation_time === "number" ? a.creation_time : 0;
@@ -1116,23 +1148,56 @@ function paginasGuardadas() {
 
 // ---------- «Para ti»: el riel del algoritmo (con sesión) ----------
 
-// Los vídeos que el algoritmo de la cuenta trae: la página de reels y,
-// de respaldo, la de watch. Con caché de 15 min (más corta que la de
-// páginas: el algoritmo cambia). El orden NO se toca: es el del riel.
+// Los vídeos que el algoritmo de la cuenta trae: la página de reels,
+// la de watch y la portada (el feed de la cuenta también trae vídeos).
+// LA CAZA MAYOR DEL RIEL: la prueba del teléfono con la 0.3.1 (13:29)
+// contó que «parati» no se cae por tiempo — recorrió reels y watch y
+// ambas volvieron sin un solo vídeo — pero la 0.3.1 aceptaba la
+// PRIMERA cara que abriera la puerta, y esa cara entrega la página
+// vacía (el feed lo carga JavaScript en el navegador real). Aquí se
+// prueban TODAS las caras — www y móvil — y se acepta la primera que
+// traiga vídeos de verdad, con presupuesto corto para no gastar el
+// del buscador. Cada intento queda en la línea «Riel Para ti» del
+// informe: cara, estado, letras y vídeos (un * significa que la
+// página traía señal de vídeo que no se dejó leer). Con caché de
+// 15 min. El orden NO se toca: es el del riel.
 async function videosParaTi() {
   const c = cachePag["*parati"];
   if (c && Date.now() - c.t < 900000) return c.nodos;
   let nodos = [];
   const urls = [
-    "https://www.facebook.com/reels/",
-    "https://www.facebook.com/watch/"
+    { nombre: "reels", url: "https://www.facebook.com/reels/" },
+    { nombre: "watch", url: "https://www.facebook.com/watch/" },
+    { nombre: "portada", url: "https://www.facebook.com/" }
   ];
-  const inicio = Date.now();
-  for (let i = 0; i < urls.length && nodos.length === 0; i++) {
-    if (i > 0 && Date.now() - inicio > 6000) break;
-    const ab = await abrirFacebook(urls[i], 1200000, 9000, false);
-    if (ab.r) nodos = videosDeHtml(ab.r.text());
+  const caras = [
+    { nombre: "nav", enc: true, movil: false },
+    { nombre: "sim", enc: false, movil: false },
+    { nombre: "m.nav", enc: true, movil: true },
+    { nombre: "m.sim", enc: false, movil: true }
+  ];
+  const t0 = Date.now();
+  const paso = [];
+  let seAcabo = false;
+  for (let u = 0; u < urls.length && !seAcabo && nodos.length === 0; u++) {
+    paso.push(urls[u].nombre + ":");
+    for (let f = 0; f < caras.length && nodos.length === 0; f++) {
+      const restante = 7000 - (Date.now() - t0);
+      if (restante < 1500) { paso.push("sin tiempo"); seAcabo = true; break; }
+      const destino = caras[f].movil ? versionMovil(urls[u].url) : urls[u].url;
+      try {
+        const r = await pedirSimple(destino, 1200000, Math.min(4000, restante), caras[f].enc);
+        const texto = r.text();
+        const hallados = videosDeHtml(texto);
+        paso.push(caras[f].nombre + ":" + r.status + "/" + Math.round(texto.length / 1000) + "k/V:" + hallados.length + (marcaVideo(texto) ? "*" : ""));
+        if (hallados.length > 0) nodos = hallados;
+      } catch (e) {
+        const m = /HTTP (d+)/.exec(String(e && e.message ? e.message : String(e)));
+        paso.push(caras[f].nombre + ":" + (m ? m[1] : "x"));
+      }
+    }
   }
+  trazaParati = paso.join(" ").slice(0, 260);
   cachePag["*parati"] = { nodos: nodos, t: Date.now() };
   return nodos;
 }
@@ -1562,7 +1627,8 @@ export async function home() {
       }
     } catch (e) { /* fila omitida, las demás siguen */ }
   }
-  trazaHome = "portada: " + ok + "/" + pags.length + " páginas con vídeos · Para ti: " +
+  trazaHome = "portada: " + ok + "/" + pags.length + " páginas con vídeos" +
+    (trazaPaginas ? " (" + trazaPaginas + ")" : "") + " · Para ti: " +
     (paraTi ? "sí" : (conSesion ? "vacío" : "sin sesión"));
   if (filas.length === 0) {
     throw kino.error("unavailable", "home sin filas", {
@@ -1841,6 +1907,7 @@ async function informeDebug() {
     "Páginas guardadas: " + pags.length + (pags.length ? " (" + pags.map(function (p) { return p.slug; }).join(", ") + ")" : ""),
     "Última búsqueda: " + (trazaBusqueda || "—"),
     "Último Inicio: " + (trazaHome || "—"),
+    "Riel Para ti: " + (trazaParati || "—"),
     "Última reproducción: " + (trazaResolve || "—"),
     "Último fallo: " + (trazaError || "—"),
     "Caché de páginas: " + Object.keys(cachePag).length,

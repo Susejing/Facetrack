@@ -14,6 +14,32 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+// FaceTrack 0.2.0 — Facebook en Kino: ahora también con tu cuenta.
+//
+// Novedades de la 0.2.0 (la ventanita de sesión): en Ajustes del plugin
+// está «Iniciar sesión en Facebook»: Kino abre su ventanita, uno entra
+// a su cuenta y la ventana se cierra sola al quedar la sesión lista
+// (Kino pregunta permiso en cada apertura; las galletas las guarda Kino
+// en ajustes password y el plugin nunca las ve). Con la sesión activa:
+// (1) el riel «Para ti» — los vídeos que trae tu algoritmo (escribe
+// «parati» en el buscador, o mira la primera fila del Inicio); (2) la
+// búsqueda REAL de Facebook por palabras (antes pedía sesión a secas);
+// (3) las páginas por nombre con sus vídeos completos (antes Facebook
+// le enseñaba al plugin una pared de login); (4) «mis paginas»: los
+// vídeos de las páginas que sigue la cuenta (experimental, esa puerta
+// de Facebook cambia seguido). Todo lo que ya funcionaba (enlaces
+// pegados, escalera de caras, caza mayor, testigo, tahoe, informe
+// debug) sigue igual — ahora, si hay sesión, las peticiones viajan con
+// las galletas de la cuenta, que es lo que Facebook quiere ver para
+// contestar de verdad.
+//
+// Honestidad de la 0.2.0: las tripas de la sesión solo se prueban de
+// verdad en el teléfono; si «Para ti» o la búsqueda no traen nada, el
+// informe «debug» dice si la sesión está activa. Sin sesión, el plugin
+// funciona igual que siempre. Y Facebook puede negarse a dejar entrar
+// dentro de una ventana embebida (como le pasa a Google con YouTube
+// Music): si un día no deja, queda el respaldo de pegar las cookies.
+
 // FaceTrack 0.1.6 — Facebook en Kino: vídeos públicos, nada más.
 //
 // Novedades de la 0.1.6 (el testigo y la caza mayor, juntos): dos frentes
@@ -121,7 +147,7 @@
 // como "facebookexternalhit/1.1" (el rastreador de vistas previas del
 // propio Facebook), que no está limitado.
 
-const VERSION = "0.1.6";
+const VERSION = "0.2.0";
 
 // La cara con la que se piden las páginas (un Chrome de escritorio).
 const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -138,6 +164,35 @@ let trazaError = "";
 // "Ver más" de una misma fila no gastan dos descargas iguales.
 var cachePag = {};
 
+// ---------- sesión: la ventanita de Kino (visualBrowser) ----------
+
+// Las galletas de la cuenta, guardadas por Kino en tres ajustes password
+// (la lista puede pasar de los 500 caracteres de uno solo: Kino la
+// reparte y aquí se lee en orden, SIN separador). Vacías = sin sesión
+// (o sesión cerrada con el botón de Ajustes).
+function galletasSesion() {
+  try {
+    if (String(kino.storage.get("fbFuera") || "") === "1") return "";
+    const trozos = [kino.config.get("fbCookie1"), kino.config.get("fbCookie2"), kino.config.get("fbCookie3")];
+    let gal = "";
+    for (let i = 0; i < trozos.length; i++) gal += String(trozos[i] || "").trim();
+    return gal;
+  } catch (e) { return ""; }
+}
+
+// ¿Hay sesión de Facebook? La definen dos galletas: c_user (quién es)
+// y xs (la llave). Sin las dos, Facebook no reconoce a nadie.
+function sesionActiva() {
+  const gal = galletasSesion();
+  return gal.indexOf("c_user=") >= 0 && gal.indexOf("xs=") >= 0;
+}
+
+// ¿Este Kino sabe abrir la ventanita de sesión? (Los Kinos anteriores a
+// 0.9.81 no la conocen: queda el respaldo de pegar las cookies a mano.)
+function hayVentanita() {
+  try { return !!(kino.visualBrowser && kino.visualBrowser.available); } catch (e) { return false; }
+}
+
 // ---------- pedir páginas: la escalera contra el HTTP 400 ----------
 
 // La cara de Chrome con la que se presentan las peticiones.
@@ -150,7 +205,17 @@ const ENCABEZADOS = {
 // Una petición sola, con o sin cara propia.
 async function pedirSimple(url, tope, tiempoMs, conEncabezados) {
   const opciones = { timeoutMs: tiempoMs || 9000, maxBytes: tope || 1200000 };
-  if (conEncabezados) opciones.headers = ENCABEZADOS;
+  // Con sesión, TODAS las peticiones viajan con las galletas de la
+  // cuenta: es lo que Facebook quiere ver para contestar de verdad
+  // (el riel Para ti, la búsqueda, las páginas completas).
+  const gal = galletasSesion();
+  if (gal) {
+    opciones.headers = conEncabezados
+      ? Object.assign({}, ENCABEZADOS, { "Cookie": gal })
+      : { "Cookie": gal };
+  } else if (conEncabezados) {
+    opciones.headers = ENCABEZADOS;
+  }
   const r = await kino.fetch(url, opciones);
   if (!r.ok) throw kino.error("unavailable", "HTTP " + r.status + " en " + url.slice(0, 90));
   return r;
@@ -786,6 +851,87 @@ function paginasGuardadas() {
   return fuera;
 }
 
+// ---------- «Para ti»: el riel del algoritmo (con sesión) ----------
+
+// Los vídeos que el algoritmo de la cuenta trae: la página de reels y,
+// de respaldo, la de watch. Con caché de 15 min (más corta que la de
+// páginas: el algoritmo cambia). El orden NO se toca: es el del riel.
+async function videosParaTi() {
+  const c = cachePag["*parati"];
+  if (c && Date.now() - c.t < 900000) return c.nodos;
+  let nodos = [];
+  const urls = [
+    "https://www.facebook.com/reels/",
+    "https://www.facebook.com/watch/"
+  ];
+  const inicio = Date.now();
+  for (let i = 0; i < urls.length && nodos.length === 0; i++) {
+    if (i > 0 && Date.now() - inicio > 6000) break;
+    const ab = await abrirFacebook(urls[i], 1200000, 9000, false);
+    if (ab.r) nodos = videosDeHtml(ab.r.text());
+  }
+  cachePag["*parati"] = { nodos: nodos, t: Date.now() };
+  return nodos;
+}
+
+async function itemsDeParaTi(limite) {
+  const nodos = await videosParaTi();
+  const items = [];
+  for (let i = 0; i < nodos.length && items.length < limite; i++) {
+    const it = itemDeVideo(nodos[i], "", "");
+    if (it) items.push(it);
+  }
+  return items;
+}
+
+// ---------- búsqueda real y páginas seguidas (con sesión) ----------
+
+// Con sesión, la búsqueda de Facebook responde de verdad: la pestaña
+// general y la de vídeos, la que traiga primero.
+async function itemsDeBusquedaReal(q, limite) {
+  let nodos = [];
+  const urls = [
+    "https://www.facebook.com/search/top?q=" + encodeURIComponent(q),
+    "https://www.facebook.com/search/videos/?q=" + encodeURIComponent(q)
+  ];
+  const inicio = Date.now();
+  for (let i = 0; i < urls.length && nodos.length === 0; i++) {
+    if (i > 0 && Date.now() - inicio > 7000) break;
+    const ab = await abrirFacebook(urls[i], 1200000, 8000, false);
+    if (ab.r) nodos = videosDeHtml(ab.r.text());
+  }
+  trazaBusqueda = "búsqueda real: " + nodos.length + " vídeo(s) de «" + q.slice(0, 40) + "»";
+  const items = [];
+  for (let i = 0; i < nodos.length && items.length < limite; i++) {
+    const it = itemDeVideo(nodos[i], "", "");
+    if (it) items.push(it);
+  }
+  return items;
+}
+
+// Los vídeos de las páginas que sigue la cuenta (experimental: esa
+// puerta de Facebook cambia seguido; si un día no trae, se dice).
+async function itemsDePaginasSeguidas(limite) {
+  let nodos = [];
+  const urls = [
+    "https://www.facebook.com/pages/feed/",
+    "https://www.facebook.com/pages/"
+  ];
+  const inicio = Date.now();
+  for (let i = 0; i < urls.length && nodos.length === 0; i++) {
+    if (i > 0 && Date.now() - inicio > 7000) break;
+    const ab = await abrirFacebook(urls[i], 1200000, 8000, false);
+    if (ab.r) nodos = videosDeHtml(ab.r.text());
+  }
+  trazaBusqueda = "páginas seguidas: " + nodos.length + " vídeo(s)";
+  const items = [];
+  for (let i = 0; i < nodos.length && items.length < limite; i++) {
+    const it = itemDeVideo(nodos[i], "", "");
+    if (it) items.push(it);
+  }
+  return items;
+}
+
 // ---------- el buscador de Kino ----------
 
 export async function search(query) {
@@ -800,19 +946,64 @@ export async function search(query) {
   const enlace = enlaceFacebook(q);
   if (enlace) return await itemDeEnlace(enlace);
 
+  // «Para ti»: el riel del algoritmo de la cuenta (pide sesión).
+  if (ql === "para ti" || ql === "parati" || ql === "para-ti" || ql === "reels") {
+    if (!sesionActiva()) {
+      trazaBusqueda = "para ti sin sesión: rechazado";
+      throw kino.error("auth_required", "para ti sin sesión", {
+        userMessage: "El riel Para ti usa tu cuenta: inicia sesión en Ajustes del plugin (Iniciar sesión en Facebook) y escribe parati."
+      });
+    }
+    trazaBusqueda = "para ti (con sesión)";
+    const items = await itemsDeParaTi(30);
+    if (items.length > 0) return items;
+    throw kino.error("not_found", "para ti vacío", {
+      userMessage: "El riel Para ti no trajo vídeos ahora mismo. Escribe debug para el informe."
+    });
+  }
+
+  // Las páginas que sigue la cuenta (experimental).
+  if (ql === "mis paginas" || ql === "mis páginas" || ql === "paginas") {
+    if (!sesionActiva()) {
+      trazaBusqueda = "mis páginas sin sesión: rechazado";
+      throw kino.error("auth_required", "mis páginas sin sesión", {
+        userMessage: "Mis páginas usa tu cuenta: inicia sesión en Ajustes del plugin y escribe mis paginas."
+      });
+    }
+    const items = await itemsDePaginasSeguidas(30);
+    if (items.length > 0) return items;
+    throw kino.error("not_found", "páginas seguidas vacías", {
+      userMessage: "No trajo vídeos de tus páginas ahora mismo (puerta experimental de Facebook). Escribe debug."
+    });
+  }
+
+
   // ¿Nombre de una página? (los nombres de Facebook no llevan espacios)
   if (/^[A-Za-z0-9.\-_]{2,60}$/.test(q)) {
     trazaBusqueda = "página: " + q;
     const items = await itemsDePagina(q, 30, "");
     if (items.length > 0) return items;
+    // Con sesión, un nombre raro puede ser una búsqueda y no una página.
+    if (sesionActiva()) {
+      const reales = await itemsDeBusquedaReal(q, 30);
+      if (reales.length > 0) return reales;
+    }
     throw kino.error("not_found", "página sin vídeos: " + q, {
       userMessage: "No encontré vídeos públicos de esa página (o no existe). El nombre es lo que va tras facebook.com/, sin espacios."
     });
   }
 
+  // Búsqueda general: con sesión responde de verdad; sin ella, aviso.
+  if (sesionActiva()) {
+    const reales = await itemsDeBusquedaReal(q, 30);
+    if (reales.length > 0) return reales;
+    throw kino.error("not_found", "sin resultados: " + q.slice(0, 60), {
+      userMessage: "La búsqueda no trajo vídeos. Escribe debug para el informe."
+    });
+  }
   trazaBusqueda = "búsqueda general (pide sesión): rechazada";
   throw kino.error("not_found", "búsqueda no compatible: " + q.slice(0, 60), {
-    userMessage: "La búsqueda general de Facebook pide iniciar sesión. Pega un enlace de vídeo o escribe el nombre EXACTO de una página (sin espacios)."
+    userMessage: "La búsqueda general de Facebook pide iniciar sesión: toca Iniciar sesión en Facebook en Ajustes del plugin. O pega un enlace de vídeo o escribe el nombre EXACTO de una página (sin espacios)."
   });
 }
 
@@ -820,15 +1011,33 @@ export async function search(query) {
 
 export async function home() {
   const pags = paginasGuardadas();
-  // Sin páginas guardadas no hay error: Kino muestra su aviso propio de
-  // "sin catálogos" y en Ajustes está la guía de cómo guardarlas.
-  if (pags.length === 0) {
+  const conSesion = sesionActiva();
+  // Sin páginas ni sesión no hay error: Kino muestra su aviso propio de
+  // "sin catálogos" y en Ajustes está la guía de cómo empezar.
+  if (pags.length === 0 && !conSesion) {
     trazaHome = "portada: sin páginas guardadas (guarda hasta 6 en Ajustes)";
     return [];
   }
   const inicio = Date.now();
   const filas = [];
   let ok = 0;
+  let paraTi = false;
+  // Con sesión, el riel del algoritmo encabeza la portada.
+  if (conSesion) {
+    try {
+      const items = await itemsDeParaTi(14);
+      if (items.length > 0) {
+        paraTi = true;
+        filas.push({
+          id: "fila.parati",
+          title: "Para ti",
+          items: items,
+          ref: "pt:parati",
+          genre: "otros"
+        });
+      }
+    } catch (e) { /* fila omitida, lo demás sigue */ }
+  }
   for (let i = 0; i < pags.length; i++) {
     // El Inicio tiene un presupuesto de tiempo: si ya va tarde, las filas
     // que falten se quedan para la próxima (la caché ayuda).
@@ -847,10 +1056,11 @@ export async function home() {
       }
     } catch (e) { /* fila omitida, las demás siguen */ }
   }
-  trazaHome = "portada: " + ok + "/" + pags.length + " páginas con vídeos";
+  trazaHome = "portada: " + ok + "/" + pags.length + " páginas con vídeos · Para ti: " +
+    (paraTi ? "sí" : (conSesion ? "vacío" : "sin sesión"));
   if (filas.length === 0) {
     throw kino.error("unavailable", "home sin filas", {
-      userMessage: "Ninguna de tus páginas trajo vídeos públicos ahora mismo. Revisa los nombres en Ajustes o prueba de nuevo en un rato."
+      userMessage: "Ni el riel Para ti ni tus páginas trajeron vídeos ahora mismo. Escribe debug para el informe."
     });
   }
   return filas;
@@ -860,6 +1070,18 @@ export async function home() {
 
 export async function browse(ref, cursor) {
   ref = String(ref || "");
+  if (ref.indexOf("pt:") === 0) {
+    const nodos = await videosParaTi();
+    const desde = cursor ? (parseInt(cursor, 10) || 0) : 0;
+    const items = [];
+    for (let i = desde; i < nodos.length && items.length < 15; i++) {
+      const it = itemDeVideo(nodos[i], "", "");
+      if (it) items.push(it);
+    }
+    const pagina = { items: items };
+    if (items.length > 0 && desde + items.length < nodos.length) pagina.next = String(desde + items.length);
+    return pagina;
+  }
   if (ref.indexOf("pg:") === 0) {
     const slug = ref.slice(3);
     const nodos = await videosDePagina(slug);
@@ -1017,9 +1239,11 @@ export async function resolve(ref, options) {
 
 export async function settingsStatus() {
   const n = paginasGuardadas().length;
+  const texto = sesionActiva()
+    ? "Sesión activa: Para ti y búsqueda real disponibles. "
+    : "Sin sesión: enlaces y páginas públicas (inicia sesión en Ajustes). ";
   return {
-    estado: ("FaceTrack " + VERSION + ". " + n + " página(s) guardadas. " +
-      "Pega enlaces de Facebook en el buscador o escribe el nombre de una página.").slice(0, 200)
+    estado: ("FaceTrack " + VERSION + ". " + texto + n + " página(s) guardadas.").slice(0, 200)
   };
 }
 
@@ -1091,6 +1315,7 @@ async function informeDebug() {
   const lineas = [
     vivo,
     "FaceTrack " + VERSION + " — informe",
+    "Sesión: " + (sesionActiva() ? "activa (c_user/xs)" : (galletasSesion() ? "galletas sin c_user/xs" : "sin sesión")) + " · ventanita: " + (hayVentanita() ? "sí" : "no"),
     "Páginas guardadas: " + pags.length + (pags.length ? " (" + pags.map(function (p) { return p.slug; }).join(", ") + ")" : ""),
     "Última búsqueda: " + (trazaBusqueda || "—"),
     "Último Inicio: " + (trazaHome || "—"),
@@ -1114,4 +1339,52 @@ function hashDe(s) {
   const t = String(s || "");
   for (let i = 0; i < t.length; i++) h = ((h << 5) + h + t.charCodeAt(i)) & 0x7fffffff;
   return h.toString(36);
+}
+
+
+// ---------- Ajustes: la ventanita de sesión ----------
+
+// Las galletas que definen una sesión de Facebook: c_user (quién es) y
+// xs (la llave), y las acompañantes que le gustan a su antispam. Kino
+// las reparte en tres ajustes porque la lista puede ser larga.
+const GALLETAS_SESION = ["c_user", "xs", "datr", "sb", "fr", "wd", "locale", "m_user"];
+
+export async function action(key) {
+  if (key !== "entrar" && key !== "salir") return;
+  if (key === "entrar") {
+    if (!hayVentanita()) {
+      return { message: "Este Kino no abre la ventanita de sesión: pega las cookies a mano en los campos de abajo." };
+    }
+    // Si la sesión se había cerrado, las galletas guardadas vuelven a
+    // mandar (el botón reactiva; para borrarlas del todo, vaciar abajo).
+    try { kino.storage.set("fbFuera", ""); } catch (e) { /* sin almacén */ }
+    let r;
+    try {
+      r = await kino.visualBrowser.open({
+        url: "https://www.facebook.com/login.php",
+        title: "Facebook",
+        doneWhen: { cookies: ["c_user", "xs"] },
+        collect: {
+          cookies: GALLETAS_SESION,
+          storeAs: { setting: "fbCookie1", spill: ["fbCookie2", "fbCookie3"], format: "header" }
+        },
+        userAgent: "browser",
+        timeoutMs: 600000
+      });
+    } catch (e) {
+      const cod = String(e && e.code ? e.code : (e && e.message ? e.message : e));
+      return { message: "La ventanita no pudo abrir: " + cod.slice(0, 100) };
+    }
+    if (r && r.status === "done" && r.stored) {
+      return { message: "Sesión lista: el riel Para ti, la búsqueda real y las páginas completas ya están disponibles." };
+    }
+    if (r && r.status === "timeout") {
+      return { message: "Se acabó el tiempo de la ventana sin terminar el login. Inténtalo de nuevo." };
+    }
+    return { message: "No se inició sesión (se cerró la ventana antes de terminar)." };
+  }
+  // Salir: el plugin deja de usar las galletas guardadas. Para borrarlas
+  // del todo (eso lo hace la persona), vaciar los campos de abajo.
+  try { kino.storage.set("fbFuera", "1"); } catch (e) { /* sin almacén */ }
+  return { message: "Sesión cerrada en FaceTrack. Para borrar las cookies del todo, vacía los tres campos de abajo." };
 }

@@ -1,30 +1,152 @@
 {
   "id": "facetrack",
   "name": "FaceTrack — Facebook",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "apiVersion": 19,
   "entry": "plugin.js",
-  "description": "Vídeos de Facebook en Kino: pega enlaces (fb.watch, watch, reels, share) en el buscador y salta directo al vídeo, o escribe el nombre de una página para ver sus vídeos públicos. Hasta 6 páginas tuyas como filas del Inicio. Calidad alta cuando Facebook la trae; los enlaces se resuelven al momento de reproducir.",
+  "description": "Vídeos de Facebook en Kino: pega enlaces (fb.watch, watch, reels, share) o escribe el nombre de una página; hasta 6 páginas tuyas como filas del Inicio. Con tu cuenta (Ajustes ▸ Iniciar sesión): tu riel Para ti y la búsqueda real.",
   "author": "Susejing",
   "homepage": "https://github.com/Susejing/Facetrack",
-  "hosts": ["facebook.com", "*.facebook.com", "fb.watch", "*.fb.watch", "fb.me", "*.fb.me", "fbcdn.net", "*.fbcdn.net"],
-  "capabilities": ["search", "home", "browse", "resolve"],
+  "hosts": [
+    "facebook.com",
+    "*.facebook.com",
+    "fb.watch",
+    "*.fb.watch",
+    "fb.me",
+    "*.fb.me",
+    "fbcdn.net",
+    "*.fbcdn.net"
+  ],
+  "capabilities": [
+    "search",
+    "home",
+    "browse",
+    "resolve"
+  ],
   "color": "#1877F2",
   "icon": "icon.png",
   "settings": [
-    { "key": "paginas", "label": "Tus páginas", "type": "section", "hint": "Hasta 6 páginas de Facebook. En cada una escribe su nombre (lo que va tras facebook.com/, ej: Crunchyroll) o pega su enlace. Cada página será una fila del Inicio. Los enlaces de vídeos sueltos se pegan directo en el buscador de Kino." },
-    { "key": "pag1", "label": "Página 1", "type": "text", "hint": "Nombre de la página o su enlace" },
-    { "key": "fila1", "label": "Nombre de la fila 1", "type": "text", "hint": "Opcional: cómo se llama la fila en el Inicio" },
-    { "key": "pag2", "label": "Página 2", "type": "text", "hint": "Nombre de la página o su enlace" },
-    { "key": "fila2", "label": "Nombre de la fila 2", "type": "text", "hint": "Opcional" },
-    { "key": "pag3", "label": "Página 3", "type": "text", "hint": "Nombre de la página o su enlace" },
-    { "key": "fila3", "label": "Nombre de la fila 3", "type": "text", "hint": "Opcional" },
-    { "key": "pag4", "label": "Página 4", "type": "text", "hint": "Nombre de la página o su enlace" },
-    { "key": "fila4", "label": "Nombre de la fila 4", "type": "text", "hint": "Opcional" },
-    { "key": "pag5", "label": "Página 5", "type": "text", "hint": "Nombre de la página o su enlace" },
-    { "key": "fila5", "label": "Nombre de la fila 5", "type": "text", "hint": "Opcional" },
-    { "key": "pag6", "label": "Página 6", "type": "text", "hint": "Nombre de la página o su enlace" },
-    { "key": "fila6", "label": "Nombre de la fila 6", "type": "text", "hint": "Opcional" },
-    { "key": "estado", "label": "Estado", "type": "status" }
-  ]
+    {
+      "key": "cuenta",
+      "label": "Sesión de Facebook",
+      "type": "section",
+      "hint": "Inicia sesión y desbloquea Para ti, la búsqueda real y las páginas completas."
+    },
+    {
+      "key": "entrar",
+      "label": "Iniciar sesión en Facebook",
+      "type": "action"
+    },
+    {
+      "key": "salir",
+      "label": "Cerrar sesión",
+      "type": "action"
+    },
+    {
+      "key": "fbCookie1",
+      "label": "Cookies 1 (respaldo a mano)",
+      "type": "password",
+      "hint": "Solo si no puedes vincular: pega c_user=…; xs=… repartido en orden"
+    },
+    {
+      "key": "fbCookie2",
+      "label": "Cookies 2 (respaldo a mano)",
+      "type": "password",
+      "hint": "Opcional"
+    },
+    {
+      "key": "fbCookie3",
+      "label": "Cookies 3 (respaldo a mano)",
+      "type": "password",
+      "hint": "Opcional"
+    },
+    {
+      "key": "paginas",
+      "label": "Tus páginas",
+      "type": "section",
+      "hint": "Hasta 6 páginas de Facebook. En cada una escribe su nombre (lo que va tras facebook.com/, ej: Crunchyroll) o pega su enlace. Cada página será una fila del Inicio. Los enlaces de vídeos sueltos se pegan directo en el buscador de Kino."
+    },
+    {
+      "key": "pag1",
+      "label": "Página 1",
+      "type": "text",
+      "hint": "Nombre de la página o su enlace"
+    },
+    {
+      "key": "fila1",
+      "label": "Nombre de la fila 1",
+      "type": "text",
+      "hint": "Opcional: cómo se llama la fila en el Inicio"
+    },
+    {
+      "key": "pag2",
+      "label": "Página 2",
+      "type": "text",
+      "hint": "Nombre de la página o su enlace"
+    },
+    {
+      "key": "fila2",
+      "label": "Nombre de la fila 2",
+      "type": "text",
+      "hint": "Opcional"
+    },
+    {
+      "key": "pag3",
+      "label": "Página 3",
+      "type": "text",
+      "hint": "Nombre de la página o su enlace"
+    },
+    {
+      "key": "fila3",
+      "label": "Nombre de la fila 3",
+      "type": "text",
+      "hint": "Opcional"
+    },
+    {
+      "key": "pag4",
+      "label": "Página 4",
+      "type": "text",
+      "hint": "Nombre de la página o su enlace"
+    },
+    {
+      "key": "fila4",
+      "label": "Nombre de la fila 4",
+      "type": "text",
+      "hint": "Opcional"
+    },
+    {
+      "key": "pag5",
+      "label": "Página 5",
+      "type": "text",
+      "hint": "Nombre de la página o su enlace"
+    },
+    {
+      "key": "fila5",
+      "label": "Nombre de la fila 5",
+      "type": "text",
+      "hint": "Opcional"
+    },
+    {
+      "key": "pag6",
+      "label": "Página 6",
+      "type": "text",
+      "hint": "Nombre de la página o su enlace"
+    },
+    {
+      "key": "fila6",
+      "label": "Nombre de la fila 6",
+      "type": "text",
+      "hint": "Opcional"
+    },
+    {
+      "key": "estado",
+      "label": "Estado",
+      "type": "status"
+    }
+  ],
+  "enhancements": {
+    "20": {
+      "visualBrowser": true
+    }
+  }
 }

@@ -14,7 +14,24 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-// FaceTrack 0.1.3 — Facebook en Kino: vídeos públicos, nada más.
+// FaceTrack 0.1.4 — Facebook en Kino: vídeos públicos, nada más.
+//
+// Novedades de la 0.1.4 (el tercer informe: la puerta se abre pero la
+// casa viene vacía): la escalera funcionó y la página del reel bajó
+// entera, PERO con cero MP4 adentro — Facebook le entrega a veces una
+// versión VACÍA de la página a la cara que abre. Tres trucos nuevos:
+// (1) LOS BLOQUES JS: además de los data-sjs, se cazan los bloques
+// handleServerJS / bigPipe.onPageletArrive / s.handle (con claves sin
+// comillas y comillas simples, convertidas a JSON) — ahí vive el
+// VideoConfig con los MP4 cuando el data-sjs viene vacío (el mismo
+// respaldo que usa el extractor de yt-dlp); (2) LA SEGUNDA VUELTA: si
+// una página abre pero trae el vídeo vacío, se vuelve a abrir empezando
+// la escalera desde abajo (navegador, galletas...) — otra cara puede
+// entregar la página buena; (3) LA PUERTA TRASERA: al reproducir se
+// prueba también la dirección antigua video/tahoe/async/<id>, que
+// contesta en JSON cuando las páginas de vídeo vienen vacías. El
+// informe "debug" ahora cuenta los bloques js y dice si el enlace del
+// vídeo (playable_url) anda suelto por el HTML crudo.
 //
 // Novedades de la 0.1.3 (el segundo informe del teléfono encontró al
 // culpable): la escalera de la 0.1.2 funcionó — una cara pasó y la página
@@ -78,7 +95,7 @@
 // como "facebookexternalhit/1.1" (el rastreador de vistas previas del
 // propio Facebook), que no está limitado.
 
-const VERSION = "0.1.3";
+const VERSION = "0.1.4";
 
 // La cara con la que se piden las páginas (un Chrome de escritorio).
 const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -120,10 +137,13 @@ function versionMovil(url) {
 
 // Abre una página de Facebook subiendo por la escalera de caras hasta que
 // una deje pasar. Devuelve { r, traza }: r es null si ninguna pudo, y la
-// traza dice qué respondió cada peldaño (se ve en "debug").
-async function abrirFacebook(url, tope, tiempoMs, sinMovil) {
+// traza dice qué respondió cada peldaño (se ve en "debug"). Con
+// reiniciar=true se ignora la cara recordada y se empieza desde abajo:
+// a veces una cara abre la puerta pero entrega una página VACÍA (sin
+// vídeo), y otra cara entrega la página buena.
+async function abrirFacebook(url, tope, tiempoMs, sinMovil, reiniciar) {
   let via = "";
-  try { via = String(kino.storage.get("fbVia") || ""); } catch (e) { /* sin almacén */ }
+  try { via = reiniciar ? "" : String(kino.storage.get("fbVia") || ""); } catch (e) { /* sin almacén */ }
   const todas = [
     { nombre: "navegador", enc: true, calentar: false, movil: false },
     { nombre: "galletas", enc: true, calentar: true, movil: false },
@@ -134,7 +154,7 @@ async function abrirFacebook(url, tope, tiempoMs, sinMovil) {
   const variantes = [];
   for (let i = 0; i < todas.length; i++) {
     if (todas[i].movil && sinMovil) continue;
-    if (todas[i].nombre === via) variantes.unshift(todas[i]);
+    if (todas[i].nombre === via && !reiniciar) variantes.unshift(todas[i]);
     else variantes.push(todas[i]);
   }
   const traza = [];
@@ -184,6 +204,65 @@ function bloquesSjs(html) {
     const cuerpo = m[1].trim();
     if (cuerpo.length < 2 || cuerpo.charAt(0) !== "{") continue;
     try { fuera.push(JSON.parse(cuerpo)); } catch (e) { /* bloque roto: al siguiente */ }
+  }
+  return fuera;
+}
+
+// La llave que cierra la que abre en la posición ini: cuenta la profundidad
+// y respeta las cadenas (para no confundirse con llaves dentro de textos).
+function cierreDe(s, ini) {
+  let prof = 0;
+  let enCadena = "";
+  for (let i = ini; i < s.length; i++) {
+    const ch = s.charAt(i);
+    if (enCadena) {
+      if (ch === "\\") { i++; continue; }
+      if (ch === enCadena) enCadena = "";
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") { enCadena = ch; continue; }
+    if (ch === "{") prof++;
+    else if (ch === "}") {
+      prof--;
+      if (prof === 0) return i;
+    }
+  }
+  return -1;
+}
+
+// Un objeto JS (con claves sin comillas, comillas simples...) convertido a
+// JSON. Si no se deja, devuelve null.
+function jsonDeJs(s) {
+  try { return JSON.parse(s); } catch (e) { /* a convertir */ }
+  let t = String(s);
+  t = t.replace(/'(?:[^'\\\n]|\\.)*'/g, function (x) { return '"' + x.slice(1, -1).replace(/"/g, '\\"') + '"'; });
+  t = t.replace(/([{,]\s*)([A-Za-z_$][A-Za-z0-9_$]*)(\s*:)/g, '$1"$2"$3');
+  t = t.replace(/,\s*([}\]])/g, "$1");
+  try { return JSON.parse(t); } catch (e) { return null; }
+}
+
+// Los bloques JS que NO son data-sjs: handleServerJS, bigPipe.onPageletArrive
+// y s.handle. Ahí vive el VideoConfig con los MP4 cuando la página viene
+// "vacía" (el mismo respaldo que usa el extractor de yt-dlp).
+function bloquesJs(html) {
+  const fuera = [];
+  const marcas = [
+    /handleServerJS\s*\(\s*\{/g,
+    /bigPipe\.onPageletArrive\s*\(\s*\{/g,
+    /\bs\.handle\s*\(\s*\{/g
+  ];
+  for (let m = 0; m < marcas.length; m++) {
+    marcas[m].lastIndex = 0;
+    let hit;
+    while ((hit = marcas[m].exec(html)) !== null) {
+      const ini = html.indexOf("{", hit.index + hit[0].length - 1);
+      if (ini < 0) break;
+      const fin = cierreDe(html, ini);
+      if (fin < 0 || fin - ini > 2000000) break;
+      const obj = jsonDeJs(html.slice(ini, fin + 1));
+      if (obj) fuera.push(obj);
+      marcas[m].lastIndex = fin;
+    }
   }
   return fuera;
 }
@@ -246,10 +325,12 @@ function caminar(nodo, fuera, cuenta, profundidad, ctxId, ctxVideo) {
 // Todos los vídeos de una página, sin repetir id. Si el mismo id aparece
 // en dos nodos (el reel: el papá con la cédula, el hijo con los enlaces),
 // gana el que trae los enlaces, heredando del otro lo que le falte.
+// Se caminan los bloques data-sjs Y los bloques JS (handleServerJS y
+// compañía), donde vive el VideoConfig cuando el data-sjs viene vacío.
 function videosDeHtml(html) {
   const nodos = [];
   const cuenta = { n: 0 };
-  const bloques = bloquesSjs(html);
+  const bloques = bloquesSjs(html).concat(bloquesJs(html));
   for (let i = 0; i < bloques.length; i++) caminar(bloques[i], nodos, cuenta, 0, "");
   const porId = {};
   const orden = [];
@@ -781,7 +862,11 @@ export async function resolve(ref, options) {
       "https://www.facebook.com/video/video.php?v=" + encodeURIComponent(id),
       "https://www.facebook.com/watch/?v=" + encodeURIComponent(id),
       "https://m.facebook.com/reel/" + encodeURIComponent(id),
-      "https://m.facebook.com/watch/?v=" + encodeURIComponent(id) + "&_rnr"
+      "https://m.facebook.com/watch/?v=" + encodeURIComponent(id) + "&_rnr",
+      // La puerta trasera antigua: contesta en JSON cuando las páginas
+      // de vídeo vienen vacías.
+      "https://www.facebook.com/video/tahoe/async/" + encodeURIComponent(id) +
+        "/?chain=true&isvideo=true&payloadtype=primary"
     ];
     const inicio = Date.now();
     const trazaIntentos = [];
@@ -791,13 +876,30 @@ export async function resolve(ref, options) {
       const ab = await abrirFacebook(intentos[i], 1800000, 9000, true);
       trazaIntentos.push(ab.r ? ab.traza.join(",") : "(" + ab.traza.join(",") + ")");
       if (!ab.r) continue;
-      try {
-        const s = streamDeHtml(ab.r.text(), id);
+      let texto = ab.r.text();
+      // La puerta trasera contesta "for (;;);{...}": se pela el prefijo
+      // y se viste de bloque data-sjs para que el cazador lo lea igual.
+      const esTahoe = intentos[i].indexOf("/tahoe/") >= 0;
+      if (esTahoe) {
+        const pos = texto.indexOf("{");
+        if (pos > 0) texto = '<script type="application/json" data-sjs>' + texto.slice(pos) + "</script>";
+      }
+      let s = null;
+      try { s = streamDeHtml(texto, id); } catch (e) { s = null; }
+      // La página abrió pero vino VACÍA (la cara recordada entrega a veces
+      // una versión sin vídeo): una vuelta más por la escalera desde abajo.
+      if (!s && i === 0 && Date.now() - inicio < 8000) {
+        const ab2 = await abrirFacebook(intentos[i], 1800000, 9000, true, true);
+        if (ab2.r) {
+          trazaIntentos.push("vuelta:" + ab2.traza.join(","));
+          try { s = streamDeHtml(ab2.r.text(), id); } catch (e2) { s = null; }
+        }
+      }
+      if (s) {
         trazaResolve = "v:" + id + " → MP4 " + (s.label || "") + " · intento " + (i + 1);
         return s;
-      } catch (e) {
-        trazaError = "página del vídeo sin MP4 (intento " + (i + 1) + ")";
       }
+      trazaError = "página del vídeo sin MP4 (intento " + (i + 1) + ")";
     }
     throw kino.error("not_found", "Facebook no entregó el vídeo " + id + ": " + trazaIntentos.join(" | "), {
       userMessage: "Facebook no entregó este vídeo: puede ser privado, haberse borrado o pedir iniciar sesión. Escribe debug para el informe."
@@ -831,6 +933,8 @@ async function informarEnVivo(url) {
   paso = paso + "escalera " + ab.traza.join(" → ") + " · " + html.length + " caracteres" +
     " · final: " + String(ab.r.url || url).slice(0, 55) +
     " · data-sjs: " + bloquesSjs(html).length +
+    " · js: " + bloquesJs(html).length +
+    " · playable_url: " + (html.indexOf("playable_url") >= 0 ? "sí" : "no") +
     " · vídeos: " + videos.length +
     " · muro: " + (pintaMuro(html) ? "SÍ" : "no");
   if (videos.length > 0) {
